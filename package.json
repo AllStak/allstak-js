@@ -1,0 +1,53 @@
+{
+  "name": "allstak-js",
+  "version": "0.1.0",
+  "description": "Official JavaScript/TypeScript SDK for the AllStak monitoring platform",
+  "main": "./dist/node/index.cjs",
+  "module": "./dist/node/index.js",
+  "browser": "./dist/browser/index.js",
+  "types": "./dist/node/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": {
+        "import": "./dist/browser/index.js",
+        "require": "./dist/browser/index.cjs"
+      },
+      "node": {
+        "import": "./dist/node/index.js",
+        "require": "./dist/node/index.cjs"
+      },
+      "default": "./dist/node/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "allstak",
+    "monitoring",
+    "error-tracking",
+    "logging",
+    "session-replay",
+    "observability"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "jsdom": "^29.0.1",
+    "prettier": "^3.2.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}

@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AllStak JS SDK — Vanilla JS Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    h1 { color: #6366f1; font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .subtitle { color: #64748b; font-size: 0.875rem; margin-bottom: 2rem; }
+    .status-bar {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 1.25rem;
+    }
+    .card h3 { font-size: 0.875rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem; }
+    .btn {
+      width: 100%;
+      padding: 0.6rem 1rem;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn:last-child { margin-bottom: 0; }
+    .btn-indigo { background: #6366f1; color: white; }
+    .btn-green { background: #22c55e; color: #052e16; }
+    .btn-yellow { background: #eab308; color: #1c1917; }
+    .btn-red { background: #ef4444; color: white; }
+    .btn-orange { background: #f97316; color: white; }
+    .btn-blue { background: #3b82f6; color: white; }
+    .btn-purple { background: #a855f7; color: white; }
+    .btn-gray { background: #475569; color: white; }
+    .log-panel {
+      background: #0d1117;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 1rem;
+      height: 280px;
+      overflow-y: auto;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.75rem;
+    }
+    .log-entry { padding: 2px 0; border-bottom: 1px solid #1e293b; display: flex; gap: 0.5rem; }
+    .log-entry:last-child { border-bottom: none; }
+    .log-time { color: #475569; min-width: 80px; }
+    .log-level { min-width: 60px; font-weight: 600; }
+    .log-level.debug { color: #64748b; }
+    .log-level.info { color: #6366f1; }
+    .log-level.warn { color: #eab308; }
+    .log-level.error { color: #ef4444; }
+    .log-level.sent { color: #22c55e; }
+    .log-level.event { color: #a855f7; }
+    .log-msg { color: #cbd5e1; }
+    .input-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .input-row input, .input-row select {
+      flex: 1;
+      background: #0f1117;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 0.4rem 0.6rem;
+      font-size: 0.8rem;
+    }
+    .input-row input::placeholder { color: #475569; }
+    .session-info {
+      background: #0d1117;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      color: #475569;
+      margin-top: 0.5rem;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>AllStak JS SDK — Vanilla JS Integration Demo</h1>
+  <p class="subtitle">Browser SDK validation — session replay, logs, errors, HTTP tracing, cron heartbeats</p>
+
+  <div class="status-bar">
+    <div class="status-dot"></div>
+    <span id="status-text">Initializing AllStak SDK...</span>
+  </div>
+
+  <div class="grid">
+
+    <!-- Logs -->
+    <div class="card">
+      <h3>Logs</h3>
+      <div class="input-row">
+        <input id="log-msg" placeholder="Log message..." value="User performed action" />
+      </div>
+      <button class="btn btn-indigo" onclick="sendLog('debug')">Send DEBUG</button>
+      <button class="btn btn-green" onclick="sendLog('info')">Send INFO</button>
+      <button class="btn btn-yellow" onclick="sendLog('warn')">Send WARN</button>
+      <button class="btn btn-red" onclick="sendLog('error')">Send ERROR</button>
+      <button class="btn btn-orange" onclick="sendLog('fatal')">Send FATAL</button>
+    </div>
+
+    <!-- Errors -->
+    <div class="card">
+      <h3>Error Capture</h3>
+      <button class="btn btn-red" onclick="throwTypeError()">Throw TypeError</button>
+      <button class="btn btn-red" onclick="throwCustomError()">Throw Custom Error</button>
+      <button class="btn btn-orange" onclick="triggerUnhandledRejection()">Unhandled Promise</button>
+      <button class="btn btn-yellow" onclick="sendMessage('warning')">captureMessage (warning)</button>
+      <button class="btn btn-indigo" onclick="sendMessage('info')">captureMessage (info)</button>
+    </div>
+
+    <!-- HTTP Requests -->
+    <div class="card">
+      <h3>HTTP Request Tracing</h3>
+      <div class="input-row">
+        <select id="http-method">
+          <option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option>
+        </select>
+        <input id="http-path" placeholder="/api/..." value="/api/users" />
+      </div>
+      <div class="input-row">
+        <input id="http-status" type="number" placeholder="200" value="200" />
+        <input id="http-duration" type="number" placeholder="ms" value="145" />
+      </div>
+      <button class="btn btn-blue" onclick="captureHTTPRequest('inbound')">Capture Inbound</button>
+      <button class="btn btn-purple" onclick="captureHTTPRequest('outbound')">Capture Outbound</button>
+      <button class="btn btn-gray" onclick="bulkHTTPRequests()">Bulk 20 requests (flush test)</button>
+    </div>
+
+    <!-- Cron Heartbeats -->
+    <div class="card">
+      <h3>Cron Heartbeats</h3>
+      <div class="input-row">
+        <input id="cron-slug" placeholder="job-slug" value="daily-report" />
+        <input id="cron-duration" type="number" placeholder="ms" value="1500" />
+      </div>
+      <div class="input-row">
+        <input id="cron-message" placeholder="message (optional)" value="" />
+      </div>
+      <button class="btn btn-green" onclick="sendHeartbeat('success')">Heartbeat SUCCESS</button>
+      <button class="btn btn-red" onclick="sendHeartbeat('failed')">Heartbeat FAILED</button>
+      <button class="btn btn-gray" onclick="simulateCronJobs()">Run 5 simulated jobs</button>
+    </div>
+
+    <!-- Session Replay -->
+    <div class="card">
+      <h3>Session Replay</h3>
+      <p style="font-size:0.75rem;color:#64748b;margin-bottom:0.75rem">
+        Session replay is auto-started. Interact with the page to generate events.
+        Flushes every 10s or at 50 events.
+      </p>
+      <button class="btn btn-purple" onclick="generateReplayEvents()">Generate 10 click events</button>
+      <button class="btn btn-indigo" onclick="simulateScrolling()">Simulate scrolling</button>
+      <button class="btn btn-blue" onclick="typeIntoInput()">Simulate masked input</button>
+      <div class="session-info" id="session-display">Session ID: loading...</div>
+    </div>
+
+    <!-- User Context -->
+    <div class="card">
+      <h3>User Context & Tags</h3>
+      <div class="input-row">
+        <input id="user-id" placeholder="User ID" value="vanilla-user-42" />
+        <input id="user-email" placeholder="Email" value="demo@allstak.io" />
+      </div>
+      <button class="btn btn-indigo" onclick="setUserContext()">Set User</button>
+      <div class="input-row" style="margin-top:0.5rem">
+        <input id="tag-key" placeholder="tag key" value="component" />
+        <input id="tag-val" placeholder="tag value" value="checkout" />
+      </div>
+      <button class="btn btn-gray" onclick="setTagContext()">Set Tag</button>
+      <button class="btn btn-blue" onclick="sendAllContext()">Set All + Send Log</button>
+    </div>
+
+  </div>
+
+  <!-- Activity Log -->
+  <div style="margin-top: 1rem;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+      <span style="font-size:0.875rem;color:#94a3b8">Activity Log</span>
+      <button class="btn btn-gray" style="width:auto;padding:0.25rem 0.75rem" onclick="clearLog()">Clear</button>
+    </div>
+    <div class="log-panel" id="activity-log"></div>
+  </div>
+
+  <!-- Invisible input for masked input demo -->
+  <input id="masked-input" type="password" style="position:absolute;left:-9999px" value="" />
+
+  <script type="module">
+    import { AllStak } from '../../dist/browser/index.mjs';
+
+    // ── Init ────────────────────────────────────────────────────────────
+    AllStak.init({
+      dsn: 'http://ask_9c3775eab9264e9aa4048b7bafc1c512@localhost:8080',
+      environment: 'vanilla-example',
+      release: '1.0.0',
+      tags: { service: 'allstak-vanilla-demo', framework: 'vanilla-js' },
+      sessionReplay: {
+        enabled: true,
+        maskAllInputs: true,
+        sampleRate: 1.0,
+      },
+    });
+
+    AllStak.setUser({ id: 'vanilla-user-1', email: 'vanilla@allstak.io' });
+    const sessionId = AllStak.getSessionId();
+    document.getElementById('session-display').textContent = `Session: ${sessionId}`;
+    document.getElementById('status-text').textContent =
+      `AllStak SDK initialized · Session: ${sessionId.slice(0, 8)}... · env: vanilla-example`;
+
+    addLog('info', 'SDK initialized', `session=${sessionId.slice(0, 8)}`);
+
+    // Expose to global for onclick handlers
+    window.AllStak = AllStak;
+    window.sessionId = sessionId;
+
+    // ── Log Helpers ──────────────────────────────────────────────────────
+    window.sendLog = function(level) {
+      const msg = document.getElementById('log-msg').value || `${level} from vanilla demo`;
+      const meta = {
+        url: window.location.href,
+        userAgent: navigator.userAgent.split(' ').pop(),
+        timestamp: new Date().toISOString(),
+        framework: 'vanilla-js',
+      };
+      AllStak.log[level](msg, meta);
+      addLog(level, `log.${level}()`, msg);
+    };
+
+    // ── Error Helpers ────────────────────────────────────────────────────
+    window.throwTypeError = function() {
+      try {
+        const obj = null;
+        console.log(obj.property);
+      } catch (err) {
+        AllStak.captureException(err, { url: window.location.href, component: 'VanillaDemo' });
+        addLog('error', 'captureException', `TypeError: ${err.message}`);
+      }
+    };
+
+    window.throwCustomError = function() {
+      class AppError extends Error {
+        constructor(msg, code) {
+          super(msg);
+          this.name = 'AppError';
+          this.code = code;
+        }
+      }
+      try {
+        throw new AppError('Failed to load user preferences', 'PREFS_LOAD_FAILED');
+      } catch (err) {
+        AllStak.captureException(err, { code: err.code, component: 'PreferencesModule' });
+        addLog('error', 'captureException', `AppError: ${err.message}`);
+      }
+    };
+
+    window.triggerUnhandledRejection = function() {
+      // This will be caught by the SDK's unhandledrejection listener
+      addLog('warn', 'unhandledrejection', 'Triggering rejected promise...');
+      Promise.reject(new Error('Vanilla: async operation failed — network timeout'));
+    };
+
+    window.sendMessage = function(level) {
+      const msg = level === 'warning'
+        ? 'Vanilla JS: slow page render detected (>3s FCP)'
+        : 'Vanilla JS: user completed onboarding flow step 3';
+      AllStak.captureMessage(msg, level);
+      addLog(level, 'captureMessage', msg);
+    };
+
+    // ── HTTP Helpers ─────────────────────────────────────────────────────
+    window.captureHTTPRequest = function(direction) {
+      const method = document.getElementById('http-method').value;
+      const path = document.getElementById('http-path').value || '/api/test';
+      const statusCode = parseInt(document.getElementById('http-status').value) || 200;
+      const durationMs = parseInt(document.getElementById('http-duration').value) || 100;
+      const host = direction === 'inbound' ? 'app.allstak-vanilla.com' : 'api.external-service.com';
+
+      AllStak.captureRequest({
+        direction,
+        method,
+        host,
+        path,
+        statusCode,
+        durationMs,
+        userId: 'vanilla-user-1',
+        traceId: `trace-vanilla-${Date.now()}`,
+      });
+      addLog('sent', `captureRequest(${direction})`, `${method} ${path} → ${statusCode} (${durationMs}ms)`);
+    };
+
+    window.bulkHTTPRequests = function() {
+      const paths = ['/api/users', '/api/products', '/api/cart', '/api/orders', '/api/auth/session',
+                     '/api/notifications', '/api/search', '/api/recommendations', '/api/reviews', '/api/wishlist',
+                     '/api/shipping', '/api/payment', '/api/coupon', '/api/address', '/api/invoice',
+                     '/api/returns', '/api/tracking', '/api/analytics', '/api/settings', '/api/support'];
+      for (let i = 0; i < 20; i++) {
+        AllStak.captureRequest({
+          direction: 'inbound',
+          method: 'GET',
+          host: 'app.allstak-vanilla.com',
+          path: paths[i],
+          statusCode: i === 18 ? 404 : i === 19 ? 500 : 200,
+          durationMs: Math.floor(Math.random() * 500) + 10,
+        });
+      }
+      addLog('sent', 'bulkHTTPRequests', '20 requests → immediate batch flush triggered');
+    };
+
+    // ── Cron Helpers ─────────────────────────────────────────────────────
+    window.sendHeartbeat = function(status) {
+      const slug = document.getElementById('cron-slug').value || 'test-job';
+      const durationMs = parseInt(document.getElementById('cron-duration').value) || 1000;
+      const message = document.getElementById('cron-message').value || undefined;
+
+      AllStak.heartbeat({ slug, status, durationMs, message });
+      addLog(status === 'success' ? 'sent' : 'error', `heartbeat(${status})`, `slug=${slug} duration=${durationMs}ms`);
+    };
+
+    window.simulateCronJobs = async function() {
+      const jobs = [
+        { slug: 'generate-sitemap', status: 'success', durationMs: 3200, message: 'Generated 12,543 URLs' },
+        { slug: 'send-weekly-digest', status: 'success', durationMs: 8900, message: 'Sent to 4,217 subscribers' },
+        { slug: 'cleanup-temp-files', status: 'success', durationMs: 450, message: 'Deleted 2.3GB of temp files' },
+        { slug: 'sync-inventory', status: 'failed', durationMs: 1200, message: 'ERR: Supplier API returned 503' },
+        { slug: 'backup-user-data', status: 'success', durationMs: 15600, message: 'Backed up 89,234 records' },
+      ];
+      for (const job of jobs) {
+        AllStak.heartbeat(job);
+        addLog(job.status === 'success' ? 'sent' : 'error', `heartbeat(${job.status})`, `${job.slug}: ${job.message}`);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    };
+
+    // ── Replay Helpers ───────────────────────────────────────────────────
+    window.generateReplayEvents = function() {
+      // Programmatically click elements to generate replay events
+      const buttons = document.querySelectorAll('.btn');
+      let i = 0;
+      const interval = setInterval(() => {
+        if (i >= 10 || i >= buttons.length) {
+          clearInterval(interval);
+          addLog('event', 'sessionReplay', '10 click events generated');
+          return;
+        }
+        // Create a real click event at a specific coordinate
+        const rect = buttons[i].getBoundingClientRect();
+        const evt = new MouseEvent('click', {
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+          bubbles: true,
+        });
+        document.dispatchEvent(evt);
+        i++;
+      }, 100);
+    };
+
+    window.simulateScrolling = function() {
+      let count = 0;
+      const interval = setInterval(() => {
+        window.scrollBy(0, 50);
+        count++;
+        if (count >= 5) {
+          clearInterval(interval);
+          window.scrollTo(0, 0);
+          addLog('event', 'sessionReplay', '5 scroll events generated');
+        }
+      }, 200);
+    };
+
+    window.typeIntoInput = function() {
+      const input = document.getElementById('masked-input');
+      input.value = 'secret-password-123';
+      const ev = new Event('input', { bubbles: true });
+      input.dispatchEvent(ev);
+      addLog('event', 'sessionReplay', 'input event fired — value will be masked as ***');
+    };
+
+    // ── Context Helpers ──────────────────────────────────────────────────
+    window.setUserContext = function() {
+      const id = document.getElementById('user-id').value;
+      const email = document.getElementById('user-email').value;
+      AllStak.setUser({ id, email });
+      addLog('info', 'setUser()', `id=${id} email=${email}`);
+    };
+
+    window.setTagContext = function() {
+      const key = document.getElementById('tag-key').value;
+      const val = document.getElementById('tag-val').value;
+      AllStak.setTag(key, val);
+      addLog('info', 'setTag()', `${key}=${val}`);
+    };
+
+    window.sendAllContext = function() {
+      setUserContext();
+      setTagContext();
+      AllStak.log.info('Full context test from vanilla JS', {
+        browser: navigator.userAgent.split(' ').slice(-1)[0],
+        language: navigator.language,
+        screen: `${screen.width}x${screen.height}`,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      });
+      addLog('info', 'sendAllContext()', 'user + tag + log sent together');
+    };
+
+    // ── Activity Log ─────────────────────────────────────────────────────
+    function addLog(level, action, detail) {
+      const panel = document.getElementById('activity-log');
+      const now = new Date().toLocaleTimeString('en', { hour12: false });
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `
+        <span class="log-time">${now}</span>
+        <span class="log-level ${level}">${level.toUpperCase()}</span>
+        <span class="log-msg">${action} — ${detail}</span>
+      `;
+      panel.appendChild(entry);
+      panel.scrollTop = panel.scrollHeight;
+    }
+
+    window.clearLog = function() {
+      document.getElementById('activity-log').innerHTML = '';
+    };
+
+    // Auto-run initial tests after 500ms
+    setTimeout(() => {
+      // Send an initial info log to confirm SDK is working
+      AllStak.log.info('Vanilla JS demo loaded', {
+        url: window.location.href,
+        userAgent: navigator.userAgent.split(' ').pop(),
+        sessionId: sessionId,
+      });
+      addLog('info', 'auto', 'SDK ready — initial log sent');
+    }, 500);
+  </script>
+</body>
+</html>
