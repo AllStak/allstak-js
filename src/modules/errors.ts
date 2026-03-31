@@ -23,6 +23,7 @@ interface ErrorIngestPayload {
   level: string;
   environment?: string;
   release?: string;
+  sessionId?: string;
   user?: { id?: string; email?: string; ip?: string };
   metadata?: Record<string, unknown>;
 }
@@ -36,6 +37,7 @@ export class ErrorModule {
   constructor(
     private transport: HttpTransport,
     private config: AllStakConfig,
+    private sessionId: string,
   ) {
     this.setupAutocapture();
   }
@@ -53,6 +55,7 @@ export class ErrorModule {
       level: 'error',
       environment: this.config.environment,
       release: this.config.release,
+      sessionId: this.sessionId,
       user: this.config.user,
       metadata: context ? { ...this.config.tags, ...context } : this.config.tags,
     };
@@ -70,6 +73,7 @@ export class ErrorModule {
       level,
       environment: this.config.environment,
       release: this.config.release,
+      sessionId: this.sessionId,
       user: this.config.user,
       metadata: this.config.tags,
     };

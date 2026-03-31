@@ -48,7 +48,7 @@ export class AllStakClient {
     const { baseUrl, apiKey } = parseDsn(config.dsn);
     this.transport = new HttpTransport(baseUrl, apiKey);
 
-    this.errors = new ErrorModule(this.transport, this.config);
+    this.errors = new ErrorModule(this.transport, this.config, this.sessionId);
     this.logs = new LogModule(this.transport, this.config);
     this.httpRequests = new HttpRequestModule(this.transport);
     this.cron = new CronModule(this.transport);
