@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AllStak SDK — Privacy & Masking Test</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+    h1 { font-size: 22px; font-weight: 700; color: #818cf8; margin: 0 0 4px; }
+    .subtitle { font-size: 13px; color: #64748b; margin: 0 0 32px; }
+    .notice {
+      background: rgba(234,179,8,0.1);
+      border: 1px solid rgba(234,179,8,0.4);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #fbbf24;
+      margin-bottom: 28px;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin: 0 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+    .badge-masked { background: #ef4444; color: #fff; }
+    .badge-safe   { background: #22c55e; color: #fff; }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 500;
+      color: #94a3b8;
+      margin-bottom: 4px;
+      margin-top: 12px;
+    }
+    label:first-of-type { margin-top: 0; }
+    input, textarea, select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus, textarea:focus, select:focus { border-color: #6366f1; }
+    textarea { resize: vertical; min-height: 70px; }
+    .submit-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 7px;
+      border: none;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 14px;
+      transition: opacity 0.15s;
+    }
+    .submit-btn:hover { opacity: 0.85; }
+    .btn-indigo { background: #6366f1; color: #fff; }
+    .btn-green  { background: #22c55e; color: #fff; }
+    .btn-red    { background: #ef4444; color: #fff; }
+    .status-panel {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 24px;
+      font-size: 11px;
+      font-family: 'Courier New', monospace;
+      color: #94a3b8;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .status-panel .log-line { margin: 2px 0; }
+    .log-ok   { color: #4ade80; }
+    .log-warn { color: #fbbf24; }
+    .log-err  { color: #f87171; }
+  </style>
+</head>
+<body>
+
+<h1>AllStak SDK — Privacy &amp; Masking Test</h1>
+<p class="subtitle">Session Replay privacy validation • Uses FAKE data only — no real personal or financial information</p>
+
+<div class="notice">
+  ⚠️ All data on this page is <strong>fake and synthetic</strong>. No real personal, financial, or payment information is used.
+  This page exists solely to verify AllStak SDK masking behavior in session replay.
+</div>
+
+<div class="grid">
+
+  <!-- Personal Info — should NOT be masked -->
+  <div class="card">
+    <div class="card-title">
+      Personal Info
+      <span class="badge badge-safe">SAFE FIELDS</span>
+    </div>
+
+    <label for="full-name">Full Name (safe — not masked)</label>
+    <input id="full-name" name="fullName" type="text" placeholder="Test User Name" autocomplete="name" />
+
+    <label for="comment">Comment / Note (safe — not masked)</label>
+    <textarea id="comment" name="comment" placeholder="This is a test comment — visible in replay"></textarea>
+
+    <label for="city">City (safe)</label>
+    <input id="city" name="city" type="text" placeholder="Test City" />
+
+    <label for="country">Country (safe)</label>
+    <select id="country" name="country">
+      <option value="">— Select country —</option>
+      <option value="sa">Saudi Arabia</option>
+      <option value="us">United States</option>
+      <option value="gb">United Kingdom</option>
+    </select>
+
+    <button class="submit-btn btn-green" onclick="submitPersonalInfo()">Submit Personal Info</button>
+  </div>
+
+  <!-- Sensitive PII — should be masked -->
+  <div class="card">
+    <div class="card-title">
+      Sensitive PII
+      <span class="badge badge-masked">SHOULD BE MASKED</span>
+    </div>
+
+    <label for="email">Email (mask expected)</label>
+    <input id="email" name="email" type="email" placeholder="fake-user@test-example.com" autocomplete="email" />
+
+    <label for="password">Password (mask expected — type=password)</label>
+    <input id="password" name="password" type="password" placeholder="FakeP@ssword123!" autocomplete="new-password" />
+
+    <label for="phone">Phone (safe field — verify behavior)</label>
+    <input id="phone" name="phone" type="tel" placeholder="+966 55 000 0000" autocomplete="tel" />
+
+    <label for="address">Address (safe field — verify behavior)</label>
+    <input id="address" name="address" type="text" placeholder="123 Test Street, Test City" autocomplete="street-address" />
+
+    <button class="submit-btn btn-red" onclick="submitPII()">Submit PII Form</button>
+  </div>
+
+  <!-- Payment Form — ALL fields should be masked -->
+  <div class="card">
+    <div class="card-title">
+      Payment Form (Fake)
+      <span class="badge badge-masked">ALL MUST BE MASKED</span>
+    </div>
+
+    <label>⚠️ FAKE DATA ONLY — Not a real payment form</label>
+
+    <label for="cardholder">Cardholder Name (mask expected)</label>
+    <input
+      id="cardholder"
+      name="cardholder"
+      type="text"
+      placeholder="FAKE TEST USER"
+      autocomplete="cc-name"
+      data-field="cardholder"
+    />
+
+    <label for="card-number">Card Number (mask expected — 16 digits)</label>
+    <input
+      id="card-number"
+      name="cardnumber"
+      type="text"
+      placeholder="4111 1111 1111 1111"
+      autocomplete="cc-number"
+      inputmode="numeric"
+      maxlength="19"
+    />
+
+    <label for="card-expiry">Expiry (mask expected)</label>
+    <input
+      id="card-expiry"
+      name="expiry"
+      type="text"
+      placeholder="12/26"
+      autocomplete="cc-exp"
+      maxlength="5"
+    />
+
+    <label for="cvv">CVV (mask expected)</label>
+    <input
+      id="cvv"
+      name="cvv"
+      type="text"
+      placeholder="123"
+      autocomplete="cc-csc"
+      maxlength="4"
+    />
+
+    <button class="submit-btn btn-indigo" onclick="submitPayment()">
+      Submit Fake Payment
+    </button>
+  </div>
+
+  <!-- Explicit masking attribute -->
+  <div class="card">
+    <div class="card-title">
+      data-allstak-mask Attribute
+      <span class="badge badge-masked">EXPLICIT MASK</span>
+    </div>
+
+    <label for="explicit-mask">Field with data-allstak-mask (always masked)</label>
+    <input
+      id="explicit-mask"
+      name="explicitMask"
+      type="text"
+      placeholder="This text is always masked"
+      data-allstak-mask
+    />
+
+    <label for="no-mask">Normal field (not masked)</label>
+    <input
+      id="no-mask"
+      name="normalField"
+      type="text"
+      placeholder="This text should appear in replay"
+    />
+
+    <button class="submit-btn btn-indigo" onclick="submitExplicitMask()">Submit</button>
+  </div>
+
+  <!-- Interaction test — click + scroll -->
+  <div class="card">
+    <div class="card-title">Interaction Capture</div>
+
+    <label>Click interactions (verify replay captures these)</label>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;">
+      <button class="submit-btn btn-indigo" id="btn-action-1" onclick="logAction('ACTION-1')">Action 1</button>
+      <button class="submit-btn btn-green"  id="btn-action-2" onclick="logAction('ACTION-2')">Action 2</button>
+      <button class="submit-btn btn-red"    id="btn-action-3" onclick="logAction('ACTION-3')">Action 3</button>
+    </div>
+
+    <label style="margin-top:16px;">Scroll test (scroll down and back up)</label>
+    <div style="height:150px;overflow-y:auto;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:10px;font-size:11px;color:#64748b;">
+      <p>Scroll line 1</p><p>Scroll line 2</p><p>Scroll line 3</p><p>Scroll line 4</p>
+      <p>Scroll line 5</p><p>Scroll line 6</p><p>Scroll line 7</p><p>Scroll line 8</p>
+      <p>Scroll line 9</p><p>Scroll line 10</p>
+    </div>
+  </div>
+
+  <!-- Error trigger for error-linked replay -->
+  <div class="card">
+    <div class="card-title">Error Trigger</div>
+
+    <label>Trigger a JS error to create an error-linked replay</label>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;">
+      <button class="submit-btn btn-red" onclick="triggerTypeError()">Throw TypeError</button>
+      <button class="submit-btn btn-red" onclick="triggerUnhandledPromise()">Unhandled Promise</button>
+      <button class="submit-btn btn-red" onclick="triggerCustomError()">Custom Error</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Status log -->
+<div class="status-panel" id="status-log">
+  <div class="log-line log-ok">✓ Privacy test page loaded</div>
+  <div class="log-line log-ok">✓ AllStak SDK initializing...</div>
+</div>
+
+<script type="module">
+  import AllStak from '../../dist/browser/index.mjs';
+
+  // Use the same API key as the vanilla-js example
+  const DSN = 'http://ask_live_vis4replay9c3775eab9264e9aa404@localhost:8080';
+
+  try {
+    AllStak.init({
+      dsn: DSN,
+      environment: 'privacy-test',
+      sessionReplay: {
+        sampleRate: 1.0,
+        maskAllInputs: false, // Test selective masking — NOT mask-all
+      },
+    });
+    logStatus('✓ AllStak SDK initialized (selective masking mode)', 'ok');
+  } catch (e) {
+    logStatus('✗ SDK init failed: ' + e.message, 'err');
+  }
+
+  // Error handlers
+  window.triggerTypeError = () => {
+    logStatus('Triggering TypeError...', 'warn');
+    try { null.property; } catch(e) { throw e; }
+  };
+
+  window.triggerUnhandledPromise = () => {
+    logStatus('Triggering unhandled promise rejection...', 'warn');
+    Promise.reject(new Error('Privacy test: unhandled promise rejection'));
+  };
+
+  window.triggerCustomError = () => {
+    logStatus('Triggering custom error...', 'warn');
+    throw new Error('Privacy test: custom error for replay linkage');
+  };
+
+  window.submitPersonalInfo = () => {
+    const name = document.getElementById('full-name').value;
+    const comment = document.getElementById('comment').value;
+    logStatus(`Submitting personal info: name="${name}" comment="${comment.slice(0,20)}..."`, 'ok');
+  };
+
+  window.submitPII = () => {
+    logStatus('Submitting PII form (email/password should be masked in replay)', 'warn');
+  };
+
+  window.submitPayment = () => {
+    logStatus('Submitting FAKE payment form (all payment fields should be masked)', 'warn');
+  };
+
+  window.submitExplicitMask = () => {
+    logStatus('Submitting explicit mask test', 'ok');
+  };
+
+  window.logAction = (action) => {
+    logStatus(`User clicked: ${action}`, 'ok');
+  };
+</script>
+
+<script>
+  function logStatus(msg, type = 'ok') {
+    const panel = document.getElementById('status-log');
+    const div = document.createElement('div');
+    div.className = 'log-line log-' + type;
+    div.textContent = new Date().toLocaleTimeString() + ' — ' + msg;
+    panel.appendChild(div);
+    panel.scrollTop = panel.scrollHeight;
+  }
+  window.logStatus = logStatus;
+</script>
+
+</body>
+</html>
