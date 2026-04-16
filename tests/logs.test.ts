@@ -39,7 +39,9 @@ describe('Log Module', () => {
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.metadata).toEqual({ userId: '42', ip: '10.0.0.1' });
+    // metadata may also include auto-injected traceId/spanId from the
+    // log() wrapper, in addition to the caller's own meta keys.
+    expect(body.metadata).toMatchObject({ userId: '42', ip: '10.0.0.1' });
   });
 
   it('timeout triggers buffer fallback', async () => {

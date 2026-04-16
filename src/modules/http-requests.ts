@@ -54,12 +54,22 @@ function generateTraceId(): string {
   });
 }
 
+type OnCaptureBreadcrumb = (item: HttpRequestItem) => void;
+
 export class HttpRequestModule {
   private queue: HttpRequestIngestItem[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private onCapture: OnCaptureBreadcrumb | null = null;
 
   constructor(private transport: HttpTransport) {
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+  }
+
+  /**
+   * Register a callback invoked on every capture(), used for auto-breadcrumbs.
+   */
+  setOnCapture(cb: OnCaptureBreadcrumb): void {
+    this.onCapture = cb;
   }
 
   /**
@@ -67,6 +77,10 @@ export class HttpRequestModule {
    * Batches internally and flushes every 5s or when 20 items accumulate.
    */
   capture(item: HttpRequestItem): void {
+    if (this.onCapture) {
+      this.onCapture(item);
+    }
+
     this.queue.push({
       traceId: item.traceId ?? generateTraceId(),
       direction: item.direction,

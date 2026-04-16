@@ -33,7 +33,9 @@ describe('Error Module', () => {
     expect(body.stackTrace).toBeDefined();
     expect(body.environment).toBe('test');
     expect(body.release).toBe('1.0.0');
-    expect(body.metadata).toEqual({ route: '/api/users' });
+    // metadata may also include auto-injected traceId/spanId from the client
+    // wrapper, in addition to the caller's own context fields.
+    expect(body.metadata).toMatchObject({ route: '/api/users' });
   });
 
   it('captureMessage sends correct payload', async () => {

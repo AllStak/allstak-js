@@ -1,8 +1,23 @@
 import { defineConfig } from 'tsup';
 
+// Banner for the Node ESM build: inject a real CJS-compatible `require`
+// via createRequire. Without this, tsup's default __require polyfill just
+// throws "Dynamic require of X is not supported" whenever the SDK tries
+// to optional-require host deps like `pg`, `mysql2`, or `better-sqlite3`
+// under ESM — silently disabling all DB auto-instrumentation.
+const NODE_ESM_REQUIRE_BANNER = [
+  "import { createRequire as __allstakCreateRequire } from 'node:module';",
+  "const require = __allstakCreateRequire(import.meta.url);",
+].join('\n');
+
 export default defineConfig([
   {
-    entry: { index: 'src/index.ts' },
+    entry: {
+      index: 'src/index.ts',
+      express: 'src/integrations/express.ts',
+      cron: 'src/integrations/cron.ts',
+      db: 'src/integrations/db/index.ts',
+    },
     format: ['cjs', 'esm'],
     dts: true,
     sourcemap: true,
@@ -11,7 +26,12 @@ export default defineConfig([
     clean: true,
   },
   {
-    entry: { index: 'src/index.ts' },
+    entry: {
+      index: 'src/index.ts',
+      express: 'src/integrations/express.ts',
+      cron: 'src/integrations/cron.ts',
+      db: 'src/integrations/db/index.ts',
+    },
     format: ['cjs', 'esm'],
     dts: true,
     sourcemap: true,
@@ -20,6 +40,13 @@ export default defineConfig([
     clean: true,
     define: {
       'globalThis.__ALLSTAK_NODE__': 'true',
+    },
+    esbuildOptions(options, context) {
+      if (context.format === 'esm') {
+        options.banner = {
+          js: NODE_ESM_REQUIRE_BANNER,
+        };
+      }
     },
   },
 ]);

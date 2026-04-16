@@ -15,6 +15,14 @@ export interface ErrorEvent {
   context?: Record<string, unknown>;
 }
 
+export interface Breadcrumb {
+  timestamp: string;
+  type: string;
+  message: string;
+  level: string;
+  data?: Record<string, unknown>;
+}
+
 // Matches backend ErrorIngestRequest DTO
 interface ErrorIngestPayload {
   exceptionClass: string;
@@ -26,20 +34,51 @@ interface ErrorIngestPayload {
   sessionId?: string;
   user?: { id?: string; email?: string; ip?: string };
   metadata?: Record<string, unknown>;
+  breadcrumbs?: Breadcrumb[];
 }
 
 const INGEST_PATH = '/ingest/v1/errors';
 
+const VALID_BREADCRUMB_TYPES = new Set(['http', 'log', 'ui', 'navigation', 'query', 'default']);
+const VALID_BREADCRUMB_LEVELS = new Set(['info', 'warn', 'error', 'debug']);
+const DEFAULT_MAX_BREADCRUMBS = 50;
+
 export class ErrorModule {
   private onErrorHandler: ((event: ErrorEvent) => void) | null = null;
   private onUnhandledRejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
+  private breadcrumbs: Breadcrumb[] = [];
+  private maxBreadcrumbs: number;
 
   constructor(
     private transport: HttpTransport,
     private config: AllStakConfig,
     private sessionId: string,
   ) {
+    this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     this.setupAutocapture();
+  }
+
+  addBreadcrumb(
+    type: string,
+    message: string,
+    level?: string,
+    data?: Record<string, unknown>,
+  ): void {
+    const crumb: Breadcrumb = {
+      timestamp: new Date().toISOString(),
+      type: VALID_BREADCRUMB_TYPES.has(type) ? type : 'default',
+      message,
+      level: level && VALID_BREADCRUMB_LEVELS.has(level) ? level : 'info',
+      ...(data ? { data } : {}),
+    };
+    if (this.breadcrumbs.length >= this.maxBreadcrumbs) {
+      this.breadcrumbs.shift(); // drop oldest
+    }
+    this.breadcrumbs.push(crumb);
+  }
+
+  clearBreadcrumbs(): void {
+    this.breadcrumbs = [];
   }
 
   captureException(error: Error, context?: Record<string, unknown>): void {
@@ -47,6 +86,10 @@ export class ErrorModule {
       ?.split('\n')
       .map((l) => l.trim())
       .filter((l) => l.startsWith('at ')) ?? [];
+
+    // Drain breadcrumbs and attach to the error payload
+    const currentBreadcrumbs = this.breadcrumbs.length > 0 ? [...this.breadcrumbs] : undefined;
+    this.breadcrumbs = [];
 
     const payload: ErrorIngestPayload = {
       exceptionClass: error.constructor?.name || error.name || 'Error',
@@ -58,6 +101,7 @@ export class ErrorModule {
       sessionId: this.sessionId,
       user: this.config.user,
       metadata: context ? { ...this.config.tags, ...context } : this.config.tags,
+      breadcrumbs: currentBreadcrumbs,
     };
 
     this.transport.send(INGEST_PATH, payload);

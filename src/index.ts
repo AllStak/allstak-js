@@ -1,13 +1,20 @@
 import { AllStakClient, AllStakConfig } from './client';
 import type { HttpRequestItem } from './modules/http-requests';
 import type { HeartbeatOptions } from './modules/cron';
+import type { Span } from './modules/tracing';
+import type { DbQueryItem } from './modules/database';
+import type { DatabaseModule } from './modules/database';
 
 export type { AllStakConfig } from './client';
-export type { ErrorEvent } from './modules/errors';
+export type { ErrorEvent, Breadcrumb } from './modules/errors';
 export type { LogEvent, LogLevel } from './modules/logs';
 export type { ReplayEvent, DOMEvent } from './modules/session-replay';
 export type { HttpRequestItem } from './modules/http-requests';
 export type { HeartbeatOptions } from './modules/cron';
+export type { SpanData } from './modules/tracing';
+export { Span } from './modules/tracing';
+export type { DbQueryItem } from './modules/database';
+export { DatabaseModule } from './modules/database';
 
 let instance: AllStakClient | null = null;
 
@@ -22,6 +29,19 @@ export const AllStak = {
 
   captureException(error: Error, context?: Record<string, unknown>): void {
     ensureInit().captureException(error, context);
+  },
+
+  addBreadcrumb(
+    type: string,
+    message: string,
+    level?: string,
+    data?: Record<string, unknown>,
+  ): void {
+    ensureInit().addBreadcrumb(type, message, level, data);
+  },
+
+  clearBreadcrumbs(): void {
+    ensureInit().clearBreadcrumbs();
   },
 
   captureMessage(
@@ -47,6 +67,21 @@ export const AllStak = {
     ensureInit().heartbeat(options);
   },
 
+  /**
+   * Access the database module for capturing DB query telemetry.
+   */
+  get database(): DatabaseModule {
+    return ensureInit().database;
+  },
+
+  /**
+   * Report a database query to AllStak.
+   * Batches internally and flushes every 5s or when 20 items accumulate.
+   */
+  captureDbQuery(item: DbQueryItem): void {
+    ensureInit().captureDbQuery(item);
+  },
+
   get log() {
     return ensureInit().log;
   },
@@ -61,6 +96,41 @@ export const AllStak = {
 
   getSessionId(): string {
     return ensureInit().getSessionId();
+  },
+
+  // ------------------------------------------------------------------
+  // Distributed Tracing
+  // ------------------------------------------------------------------
+
+  /**
+   * Start a new span. Automatically parented to the current active span.
+   * Call `span.finish()` when the operation completes.
+   */
+  startSpan(
+    operation: string,
+    options?: { description?: string; tags?: Record<string, string> },
+  ): Span {
+    return ensureInit().startSpan(operation, options);
+  },
+
+  /** Get the current trace ID (creates one if none exists). */
+  getTraceId(): string {
+    return ensureInit().getTraceId();
+  },
+
+  /** Set the trace ID explicitly (e.g. from an incoming request header). */
+  setTraceId(traceId: string): void {
+    ensureInit().setTraceId(traceId);
+  },
+
+  /** Get the current active span ID, or null if no span is active. */
+  getCurrentSpanId(): string | null {
+    return ensureInit().getCurrentSpanId();
+  },
+
+  /** Reset trace context (trace ID and span stack). */
+  resetTrace(): void {
+    ensureInit().resetTrace();
   },
 
   destroy(): void {

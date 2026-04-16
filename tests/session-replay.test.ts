@@ -69,7 +69,7 @@ describe('Session Replay Module', () => {
       const body = JSON.parse(replayCalls[replayCalls.length - 1][1].body);
       const inputEvents = body.events.filter((e: { eventType: string }) => e.eventType === 'input');
       expect(inputEvents.length).toBeGreaterThan(0);
-      expect(JSON.parse(inputEvents[0].eventData).value).toBe('***');
+      expect(JSON.parse(inputEvents[0].eventData).value).toBe('[MASKED]');
     });
 
     document.body.removeChild(input);

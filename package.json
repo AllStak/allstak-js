@@ -1,26 +1,57 @@
 {
   "name": "allstak-js",
-  "version": "0.1.0",
-  "description": "Official JavaScript/TypeScript SDK for the AllStak monitoring platform",
-  "main": "./dist/node/index.cjs",
-  "module": "./dist/node/index.js",
-  "browser": "./dist/browser/index.js",
+  "version": "1.1.0",
+  "description": "Official JavaScript/TypeScript SDK for the AllStak observability platform — drop-in error tracking, logs, HTTP requests, DB queries, traces, outbound HTTP, and cron monitoring for Node.js, Express, and the browser.",
+  "main": "./dist/node/index.js",
+  "module": "./dist/node/index.mjs",
+  "browser": {
+    "./dist/node/index.js": "./dist/browser/index.js",
+    "./dist/node/index.mjs": "./dist/browser/index.mjs"
+  },
   "types": "./dist/node/index.d.ts",
   "exports": {
     ".": {
+      "react-native": "./dist/browser/index.mjs",
       "browser": {
-        "import": "./dist/browser/index.js",
-        "require": "./dist/browser/index.cjs"
+        "types": "./dist/browser/index.d.ts",
+        "import": "./dist/browser/index.mjs",
+        "default": "./dist/browser/index.js"
       },
-      "node": {
-        "import": "./dist/node/index.js",
-        "require": "./dist/node/index.cjs"
+      "import": {
+        "types": "./dist/node/index.d.mts",
+        "default": "./dist/node/index.mjs"
       },
-      "default": "./dist/node/index.js"
-    }
+      "require": {
+        "types": "./dist/node/index.d.ts",
+        "default": "./dist/node/index.js"
+      },
+      "default": "./dist/node/index.mjs"
+    },
+    "./express": {
+      "types": "./dist/node/express.d.ts",
+      "import": "./dist/node/express.mjs",
+      "require": "./dist/node/express.js",
+      "default": "./dist/node/express.mjs"
+    },
+    "./cron": {
+      "types": "./dist/node/cron.d.ts",
+      "import": "./dist/node/cron.mjs",
+      "require": "./dist/node/cron.js",
+      "default": "./dist/node/cron.mjs"
+    },
+    "./db": {
+      "types": "./dist/node/db.d.ts",
+      "import": "./dist/node/db.mjs",
+      "require": "./dist/node/db.js",
+      "default": "./dist/node/db.mjs"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -28,17 +59,40 @@
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
     "allstak",
+    "observability",
     "monitoring",
     "error-tracking",
     "logging",
+    "tracing",
+    "apm",
     "session-replay",
-    "observability"
+    "node",
+    "nodejs",
+    "express",
+    "browser",
+    "typescript"
   ],
+  "homepage": "https://allstak.io",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/allstak/sdk-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/allstak/sdk-js/issues"
+  },
+  "author": "AllStak",
   "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",

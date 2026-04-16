@@ -1,273 +1,346 @@
 # allstak-js
 
-Official JavaScript/TypeScript SDK for the [AllStak](https://allstak.com) monitoring platform.
+Official JavaScript/TypeScript SDK for [AllStak](https://allstak.io). Drop-in observability for Node.js, Express, and the browser. One install + one API key gives you error tracking, logs, HTTP requests, DB queries, traces, outbound HTTP capture, and cron monitoring.
 
-Covers: **Error Monitoring**, **Logs**, **HTTP Request Tracing**, **Cron Heartbeats**, and **Session Replay**.
+## 1. What you get
 
-## Installation
+**One package. One API key. Zero code changes for the basics.** After adding the SDK to your Node app and dropping in the Express middleware, every unhandled error, every inbound HTTP request, every WARN/ERROR log line, every DB query (via the optional `pg`/`mysql2` instrumentation), and every outbound webhook is automatically captured and shipped to AllStak.
+
+## 2. Install
 
 ```bash
 npm install allstak-js
-# or
-pnpm add allstak-js
+# or: pnpm add allstak-js   /   yarn add allstak-js
 ```
 
-## Quick Start
+Requires Node.js **18+** (uses native `fetch`). Modern browsers and React Native are also supported via the package's `exports` map.
 
-```typescript
+## 3. 60-second setup (Express)
+
+```ts
+import express from 'express';
+import { AllStak } from 'allstak-js';
+import { allstakExpress } from 'allstak-js/express';
+
+AllStak.init({
+  apiKey: process.env.ALLSTAK_API_KEY!,
+  environment: process.env.NODE_ENV ?? 'production',
+  release: process.env.GIT_SHA ?? 'v1.0.0',
+});
+
+const app = express();
+
+// Mount BEFORE your routes
+app.use(allstakExpress.requestHandler());
+
+app.get('/tasks', (req, res) => { /* … */ });
+
+// Mount AFTER your routes
+app.use(allstakExpress.errorHandler());
+
+app.listen(3000);
+```
+
+That's it. The SDK auto-attaches `req.user` (if set), opens a per-request trace span, captures the inbound HTTP request, and reports any thrown error to AllStak. Get the API key from your AllStak dashboard → Project → Install SDK.
+
+## 4. First error in under a minute
+
+Boot your app and trigger any error route you have. For example, a route that throws:
+
+```ts
+app.get('/boom', () => { throw new Error('hello allstak'); });
+```
+
+`curl http://localhost:3000/boom` and open the AllStak dashboard → **Errors**. You'll see the exception with the full stack trace, request method/path/host, the per-request trace ID, the authenticated user, and breadcrumbs of recent log/HTTP entries.
+
+To send a manual event from anywhere in your code:
+
+```ts
+import { AllStak } from 'allstak-js';
+AllStak.captureMessage('hello from JS SDK', 'info');
+AllStak.captureException(new Error('something went wrong'));
+```
+
+## 5. Plain Node (no Express)
+
+```ts
 import { AllStak } from 'allstak-js';
 
 AllStak.init({
-  dsn: 'https://YOUR_API_KEY@your-allstak-instance.com',
+  apiKey: process.env.ALLSTAK_API_KEY!,
   environment: 'production',
-  release: '1.0.0',
-  sessionReplay: {
-    enabled: true,
-    maskAllInputs: true,
-    sampleRate: 1.0,
-  },
-});
-```
-
-## API Reference
-
-### Error Monitoring
-
-```typescript
-// Capture an exception
-AllStak.captureException(new Error('Something broke'), {
-  route: '/api/users',
+  release: 'v1.0.0',
 });
 
-// Capture a message
-AllStak.captureMessage('Disk space low', 'warning');
+// Optional: tag every event with a global field
+AllStak.setTag('service', 'worker');
 
-// Auto-capture is enabled by default:
-// - window.onerror
-// - unhandledrejection
-```
-
-### Session Replay (Browser Only)
-
-Session replay is automatically started when `sessionReplay.enabled` is `true` in the config. It records:
-
-- DOM mutations
-- Click events
-- Scroll events
-- Input events (masked when `maskAllInputs: true`)
-
-Events are batched and uploaded every 10 seconds or when the buffer reaches 50 events.
-
-### HTTP Request Tracing
-
-```typescript
-// Report an inbound or outbound HTTP request.
-// Batches internally — flushes every 5s or when 20 items accumulate.
-AllStak.captureRequest({
-  direction: 'inbound',           // 'inbound' | 'outbound'
-  method: 'GET',
-  host: 'api.example.com',
-  path: '/users/123',
-  statusCode: 200,
-  durationMs: 145,
-  userId: 'user-42',              // optional
-  traceId: 'my-trace-id',         // optional, auto-generated if omitted
-});
-```
-
-### Cron Heartbeats
-
-```typescript
-// Report a cron job execution. The slug must match a monitor configured
-// in the AllStak dashboard under Cron Monitors.
-const start = Date.now();
 try {
-  await runDailyReport();
-  AllStak.heartbeat({
-    slug: 'daily-report',
-    status: 'success',
-    durationMs: Date.now() - start,
-  });
+  await runJob();
 } catch (err) {
-  AllStak.heartbeat({
-    slug: 'daily-report',
-    status: 'failed',
-    durationMs: Date.now() - start,
-    message: err.message,
-  });
+  AllStak.captureException(err as Error);
+} finally {
+  AllStak.destroy(); // graceful flush before exit
 }
 ```
 
-### Logs
+The SDK installs Node `uncaughtException` and `unhandledRejection` listeners automatically. Disable with `autoNodeErrorCapture: false`.
 
-```typescript
-AllStak.log.debug('Verbose debug info');
-AllStak.log.info('User signed in', { userId: '42' });
-AllStak.log.warn('Slow query detected', { duration: 3200 });
-AllStak.log.error('Payment failed', { orderId: 'abc-123' });
-AllStak.log.fatal('Database unreachable');
+## 6. What gets captured automatically
+
+| Feature | Where | Default |
+|---|---|---|
+| `uncaughtException` + `unhandledRejection` | Node `process.on(...)` | ✅ on (Node) |
+| `window.onerror` + `unhandledrejection` | Browser `window.addEventListener(...)` | ✅ on (browser) |
+| `console.warn` / `console.error` → breadcrumbs | Auto-instrumented | ✅ on |
+| `fetch()` → breadcrumbs | Auto-instrumented | ✅ on |
+| Inbound HTTP requests | `allstakExpress.requestHandler()` | manual mount |
+| Express thrown errors | `allstakExpress.errorHandler()` | manual mount |
+| Per-request trace span | Started in `requestHandler` | manual mount |
+| Authenticated user (`req.user`) | `requestHandler` | auto |
+| `pg` / `mysql2` / `sqlite` queries | `allstak-js` auto-instrumentation hook | ✅ on (Node) |
+| Prisma / Sequelize / Mongoose / MongoDB queries | `allstak-js/db` opt-in helpers | manual wire-up |
+| Browser session replay | `sessionReplay.enabled: true` | opt-in |
+| Scheduled task heartbeats | `monitor()` from `allstak-js/cron` | manual wrap |
+
+Each automatic feature can be turned off via the `AllStak.init()` config:
+
+```ts
+AllStak.init({
+  apiKey: '…',
+  autoBreadcrumbs: false,
+  autoNodeErrorCapture: false,
+  autoDbInstrumentation: false,
+});
 ```
 
-### User Context
+## 7. Manual capture
 
-```typescript
-AllStak.setUser({ id: '123', email: 'user@example.com' });
-AllStak.setTag('component', 'checkout');
-```
-
-### Cleanup
-
-```typescript
-AllStak.destroy();
-```
-
-## SDK Behavior
-
-| Behavior | Value |
-|----------|-------|
-| Request timeout | 3000ms |
-| Local buffer | Yes — queues events when offline |
-| Retry strategy | Exponential backoff |
-| Max retries | 3 |
-| Backoff formula | `delay = 500ms * 2^attempt` |
-| Buffer max size | 100 events (drops oldest) |
-
-## Framework Usage
-
-### React (Vite / CRA)
-
-Create a singleton init file and import it once at the app entry point:
-
-```typescript
-// src/allstak.ts
+```ts
 import { AllStak } from 'allstak-js';
 
-AllStak.init({
-  dsn: 'https://YOUR_API_KEY@your-allstak-instance.com',
-  environment: import.meta.env.MODE,
-  release: import.meta.env.VITE_APP_VERSION,
-  service: 'my-react-app',
-  sessionReplay: { enabled: true, maskAllInputs: true, sampleRate: 1.0 },
+// Errors with metadata
+AllStak.captureException(new Error('payment failed'), {
+  orderId: 'ORD-123',
+  amount: 99.9,
 });
 
-export default AllStak;
+// Messages
+AllStak.captureMessage('Payment retried', 'warning');
+
+// Logs (debug | info | warn | error | fatal)
+AllStak.log.info('Order processed', { orderId: 'ORD-123' });
+AllStak.log.warn('Retrying payment', { attempt: 2 });
+AllStak.log.error('Payment failed', { gateway: 'stripe' });
+
+// Per-process user context (Express middleware also auto-attaches req.user)
+AllStak.setUser({ id: 'user-42', email: 'alice@example.com' });
+
+// Global tags attached to every event
+AllStak.setTag('service', 'checkout-api');
+AllStak.setTag('region', 'eu-west-1');
+
+// Breadcrumbs (attached to the next captured error)
+AllStak.addBreadcrumb('ui',   'User clicked Pay');
+AllStak.addBreadcrumb('http', 'POST /payments -> 502', 'error', { statusCode: 502 });
+
+// Outbound HTTP requests (Express integration captures inbound automatically)
+AllStak.captureRequest({
+  direction: 'outbound',
+  method: 'POST',
+  host: 'api.stripe.com',
+  path: '/v1/charges',
+  statusCode: 200,
+  durationMs: 187,
+});
+
+// Manual cron heartbeats (or use the wrapper helper from allstak-js/cron)
+AllStak.heartbeat({ slug: 'daily-report', status: 'success', durationMs: 1240 });
 ```
 
-```typescript
-// src/main.tsx
-import './allstak';   // initialise before rendering
-import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import App from './App';
+## 7.5 Database instrumentation (`allstak-js/db`)
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode><App /></StrictMode>,
-);
-```
+AllStak captures database queries for six of the most common Node data layers.
+Three are auto-instrumented at `AllStak.init()` time (you don't have to write
+any DB wiring code); the other three are ORMs and must be opted in explicitly
+because they require a live client instance.
 
-Unhandled errors and promise rejections are captured automatically. Use the SDK anywhere in the app:
+| Driver / ORM | Auto or manual | Notes |
+|---|---|---|
+| `pg` (PostgreSQL) | auto | Client + Pool, callback + promise + Submittable. Captures BEGIN / COMMIT / ROLLBACK transactions individually. |
+| `mysql2` (incl. `mysql2/promise`) | auto | Classic Connection + Pool, promise pool, `pool.execute` prepared statements. |
+| `better-sqlite3`, `sqlite3`, `node:sqlite` | auto | Prepare / run / get / all / iterate, plus compile-time errors on bad SQL. |
+| Prisma (`@prisma/client`) | opt-in via `instrumentPrisma(...)` | Uses Prisma's `$on('query')` event — client must be constructed with `log: [{ emit: 'event', level: 'query' }]`. |
+| Sequelize | opt-in via `instrumentSequelize(...)` | Hooks `beforeQuery`/`afterQuery` and patches `connectionManager.getConnection` to mark raw connections so the driver layer skips duplicates. |
+| MongoDB + Mongoose | opt-in via `instrumentMongo` / `instrumentMongoose(...)` | Hooks the official `mongodb` driver APM events (`commandStarted`/`commandSucceeded`/`commandFailed`). The client must be constructed with `monitorCommands: true`. |
 
-```typescript
-import AllStak from './allstak';
-
-// In an error boundary:
-AllStak.captureException(error, { component: 'CheckoutForm' });
-
-// In an API utility:
-AllStak.captureRequest({ direction: 'outbound', method: 'POST',
-  host: 'api.stripe.com', path: '/v1/charges', statusCode: 200, durationMs: 312 });
-```
-
-### Vanilla JS (ES Module)
-
-```html
-<script type="module">
-  import { AllStak } from '/dist/browser/index.mjs';
-
-  AllStak.init({
-    dsn: 'https://YOUR_API_KEY@your-allstak-instance.com',
-    environment: 'production',
-    service: 'my-vanilla-app',
-    sessionReplay: { enabled: true, maskAllInputs: true },
-  });
-
-  document.getElementById('pay-btn').addEventListener('click', async () => {
-    const t0 = Date.now();
-    try {
-      const res = await fetch('/api/payment', { method: 'POST', body: JSON.stringify(cart) });
-      AllStak.captureRequest({
-        direction: 'inbound', method: 'POST', host: location.hostname,
-        path: '/api/payment', statusCode: res.status, durationMs: Date.now() - t0,
-      });
-    } catch (err) {
-      AllStak.captureException(err);
-    }
-  });
-</script>
-```
-
-When using a local dev server, ensure the server root is the project root so that the SDK `dist/` path is accessible. See `examples/serve.mjs` for a minimal static server that handles this.
-
-### Node.js (ESM)
-
-```javascript
-// server.mjs
+```ts
+// Driver-level captures are automatic:
 import { AllStak } from 'allstak-js';
+import { Pool } from 'pg';
+AllStak.init({ apiKey: process.env.ALLSTAK_API_KEY! });
+const pool = new Pool({ /* ... */ });
+await pool.query('SELECT 1');   // → captured automatically
+
+// ORM captures are opt-in:
+import { instrumentPrisma, instrumentSequelize, instrumentMongoose } from 'allstak-js/db';
+import { PrismaClient } from '@prisma/client';
+import { Sequelize } from 'sequelize';
+import mongoose from 'mongoose';
+
+const prisma = new PrismaClient({
+  log: [{ emit: 'event', level: 'query' }],
+});
+instrumentPrisma(prisma, AllStak.database, { databaseType: 'postgresql' });
+
+const sequelize = new Sequelize({ dialect: 'postgres', /* ... */ });
+instrumentSequelize(sequelize, AllStak.database);
+
+await mongoose.connect(process.env.MONGO_URL!, { monitorCommands: true });
+instrumentMongoose(mongoose, AllStak.database);
+```
+
+**Safe by default.** SQL queries are normalized before they leave your
+process — single-quoted string literals, numeric literals, dollar-quoted
+blocks, and block/line comments are all replaced with `?` placeholders.
+Double-quoted identifiers (`"public"."Task"`) are preserved so ORM-generated
+queries remain readable. No parameter values are ever captured.
+
+**What we capture per query:** `normalizedQuery`, `queryHash`, `queryType`
+(SELECT/INSERT/UPDATE/DELETE/BEGIN/COMMIT/ROLLBACK/OTHER for SQL,
+FIND/INSERT/UPDATE/DELETE for Mongo), `durationMs`, `status` (success/error),
+`errorMessage` (first 500 chars on failure), `databaseName`, `databaseType`,
+`rowsAffected`, `traceId` + `spanId` (auto-populated from the active span),
+`service`, and `environment`.
+
+**ORM double-capture prevention.** When you call `instrumentSequelize(...)`
+the integration marks Sequelize's raw connection objects as ORM-owned and
+the driver-level wrappers skip them — so queries are recorded once by the
+ORM hook, not twice.
+
+## 8. Cron monitoring (`allstak-js/cron`)
+
+```ts
+import cron from 'node-cron';
+import { AllStak } from 'allstak-js';
+import { monitor } from 'allstak-js/cron';
+
+AllStak.init({ apiKey: process.env.ALLSTAK_API_KEY! });
+
+// Wrap any function so every call ships a heartbeat with success/failure
+// + real durationMs. Slug is auto-normalised to ^[a-z0-9-]+$.
+cron.schedule('*/5 * * * *', monitor('daily-report', async () => {
+  await runDailyReport();
+}));
+
+// Works with any scheduler — node-cron, node-schedule, BullMQ, Agenda,
+// plain setInterval. The wrapper preserves the original return value
+// and re-throws on error so the host scheduler still sees failures.
+```
+
+## 9. Where to find your data in the dashboard
+
+| What you sent | Dashboard page |
+|---|---|
+| Exceptions (auto + `captureException`) | **Errors** |
+| Log lines (`AllStak.log.*`) | **Logs** |
+| Inbound + outbound HTTP requests | **Requests** |
+| `pg` / `mysql2` / `sqlite` / Prisma / Sequelize / MongoDB / Mongoose queries | **Database** |
+| Per-request trace spans | **Traces** |
+| Cron heartbeats (`monitor()` / `heartbeat()`) | **Cron Jobs** |
+| Browser session replays | **Session Replay** |
+
+Click any error to see the full stack trace, breadcrumbs, request context (method/path/host/trace ID), the user, custom metadata as tags, occurrence count, fingerprint, release, environment, and the linked trace.
+
+## 10. Production notes
+
+- **Buffering**: HTTP requests, DB queries, and spans are batched in per-channel queues (default ~20 items / 5 s flush interval). Errors and cron heartbeats are sent immediately.
+- **Retries**: built-in exponential-backoff retry on transport failures. The transport buffers payloads on failure and replays them on the next successful send.
+- **Timeouts**: 3 s per request. Never blocks your hot path.
+- **Static ingest host**: the SDK ships with the production ingest URL baked in (`INGEST_HOST`). There is no DSN, no host config to manage. Self-hosted? Pass `host: 'https://your-allstak.example.com'` to `AllStak.init()`.
+- **No-op safe**: if `apiKey` is missing, `AllStak.init()` will throw. Wrap the call in a feature flag for staging if needed.
+- **Graceful shutdown**: call `AllStak.destroy()` before your process exits to flush buffers.
+- **Trace propagation**: the Express middleware honors an upstream `x-trace-id` or `traceparent` header, so distributed traces stitch end-to-end across services.
+- **Sensitive headers**: not captured by default — only method, path, host, status code, duration. Add custom redaction in your own middleware if needed.
+
+## 11. Troubleshooting
+
+**Events aren't appearing in the dashboard.**
+1. Confirm the SDK was initialised exactly once. Check that `AllStak.init({ apiKey: '…' })` runs before any other SDK call.
+2. Confirm the API key is correct. The dashboard shows the key once at project creation; if you lost it, regenerate one in **Settings → API Keys**.
+3. Confirm you're looking at the correct project in the dashboard's project picker. API keys are project-scoped.
+4. Open the dashboard's environment filter (top right) and switch to "All Envs" — events show up under whatever `environment` field you sent.
+5. Buffered events flush every 5 s. Wait at least that long before refreshing the dashboard.
+
+**Express integration isn't capturing requests.** Make sure `app.use(allstakExpress.requestHandler())` is mounted **before** your routes, and `allstakExpress.errorHandler()` is mounted **after** them. Order matters in Express.
+
+**Outbound HTTP isn't captured.** The Express request handler captures *inbound* requests. For *outbound* calls (`fetch`/`axios`/etc.), call `AllStak.captureRequest({ direction: 'outbound', … })` from your service layer, or use the `pg`/`mysql2` auto-instrumentation for DB queries.
+
+**`AllStak.init() must be called before using the SDK`.** You called a capture method before init. Make sure your bootstrap file runs `AllStak.init(...)` before importing modules that use the SDK.
+
+**TypeScript types not resolving.** Make sure `moduleResolution` is set to `Bundler`, `NodeNext`, or `Node16` in your `tsconfig.json` so TypeScript honours the package's `exports` map.
+
+**Where's the host config?** There isn't one for normal customers. The ingest URL is the production AllStak endpoint (`INGEST_HOST`). For self-hosted AllStak deployments or integration tests, pass `host: 'https://your-allstak.example.com'` to `AllStak.init()`.
+
+## 12. Real Express example
+
+```ts
+// server.ts
+import express from 'express';
+import session from 'express-session';
+import { AllStak } from 'allstak-js';
+import { allstakExpress } from 'allstak-js/express';
 
 AllStak.init({
-  dsn: 'https://YOUR_API_KEY@your-allstak-instance.com',
+  apiKey: process.env.ALLSTAK_API_KEY!,
   environment: process.env.NODE_ENV ?? 'production',
-  service: 'my-api-server',
+  release: process.env.GIT_SHA ?? 'v1.0.0',
+  tags: { service: 'checkout-api' },
 });
 
-// Express middleware — capture every inbound request
-app.use((req, res, next) => {
-  const t0 = Date.now();
-  res.on('finish', () => {
-    AllStak.captureRequest({
-      direction: 'inbound',
-      method: req.method,
-      host: req.hostname,
-      path: req.path,
-      statusCode: res.statusCode,
-      durationMs: Date.now() - t0,
-      userId: req.user?.id,
-    });
-  });
+const app = express();
+app.use(express.json());
+app.use(session({ secret: process.env.SESSION_SECRET!, resave: false, saveUninitialized: false }));
+app.use(allstakExpress.requestHandler());
+
+// Tiny user resolver — anything you put on req.user gets attached automatically.
+app.use(async (req, _res, next) => {
+  if (req.session?.userId) {
+    req.user = await db.user.findUnique({ where: { id: req.session.userId } });
+  }
   next();
 });
 
-// Cron job wrapper
-async function runWithHeartbeat(slug, fn) {
-  const t0 = Date.now();
+app.post('/checkout/:orderId', async (req, res, next) => {
   try {
-    await fn();
-    AllStak.heartbeat({ slug, status: 'success', durationMs: Date.now() - t0 });
+    AllStak.addBreadcrumb('ui', `Customer clicked checkout for ${req.params.orderId}`);
+    const receipt = await orderService.process(req.params.orderId);
+
+    // Outbound HTTP — capture it for the Requests page
+    const start = Date.now();
+    const stripeRes = await fetch('https://api.stripe.com/v1/charges', { method: 'POST', /* … */ });
+    AllStak.captureRequest({
+      direction: 'outbound',
+      method: 'POST',
+      host: 'api.stripe.com',
+      path: '/v1/charges',
+      statusCode: stripeRes.status,
+      durationMs: Date.now() - start,
+    });
+
+    res.json({ ok: true, receipt });
   } catch (err) {
-    AllStak.heartbeat({ slug, status: 'failed', durationMs: Date.now() - t0, message: err.message });
-    throw err;
+    // Optional — already captured automatically by the error handler.
+    AllStak.captureException(err as Error, { orderId: req.params.orderId });
+    next(err);
   }
-}
+});
+
+app.use(allstakExpress.errorHandler());
+app.listen(3000);
 ```
 
-Session replay is not included in the Node.js build (`dist/node/`).
-
-## Development
-
-```bash
-pnpm install
-pnpm build       # Produces dist/browser/ and dist/node/
-pnpm test        # Runs all tests via Vitest
-pnpm lint        # ESLint
-pnpm format      # Prettier
-```
-
-## Build Outputs
-
-- `dist/browser/` — Browser build (includes session replay)
-- `dist/node/` — Node.js build (excludes session replay)
-
-Both outputs include CJS, ESM, type declarations, and source maps.
+That's the entire integration. The SDK handles the rest.
 
 ## License
 
