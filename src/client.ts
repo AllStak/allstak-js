@@ -8,6 +8,7 @@ import { TracingModule, Span } from './modules/tracing';
 import { DatabaseModule, DbQueryItem, enableDbAutoInstrumentation } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
 import { instrumentFetch, instrumentConsole } from './modules/auto-breadcrumbs';
+import { instrumentNodeHttp } from './modules/auto-node-http';
 import { generateId } from './utils/uuid';
 
 /**
@@ -108,13 +109,19 @@ export class AllStakClient {
     this.errors = new ErrorModule(this.transport, this.config, this.sessionId);
     this.logs = new LogModule(this.transport, this.config);
     this.httpRequests = new HttpRequestModule(this.transport);
+    this.httpRequests.setDefaults({
+      environment: config.environment,
+      release: config.release,
+    });
     this.cron = new CronModule(this.transport);
     this._database = new DatabaseModule(this.transport, {
       service: config.tags?.service,
       environment: config.environment,
     });
 
-    if (config.autoDbInstrumentation !== false) {
+    // Auto-DB instrumentation is Node-only (requires `require()` + `process`).
+    // Skip entirely in browsers so the SDK never references `process` there.
+    if (config.autoDbInstrumentation !== false && typeof window === 'undefined') {
       enableDbAutoInstrumentation(this._database, {
         service: config.tags?.service,
         environment: config.environment,
@@ -145,8 +152,27 @@ export class AllStakClient {
 
     // Wire automatic breadcrumb instrumentation
     if (config.autoBreadcrumbs !== false) {
-      instrumentFetch((type, msg, level, data) => this.addBreadcrumb(type, msg, level, data));
+      instrumentFetch(
+        (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
+        (item) => this.captureRequest({ ...item, method: item.method as HttpRequestItem['method'] }),
+        baseUrl,
+      );
       instrumentConsole((type, msg, level, data) => this.addBreadcrumb(type, msg, level, data));
+
+      // Node-only: also patch node:http and node:https so libraries that don't
+      // go through global fetch (axios, got, node-fetch, native http) are
+      // captured as outbound HTTP requests too.
+      if (this.isNodeBuild() || typeof process !== 'undefined' && process.versions?.node) {
+        try {
+          instrumentNodeHttp(
+            (item) => this.captureRequest({ ...item, method: item.method as HttpRequestItem['method'] }),
+            (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
+            baseUrl,
+          );
+        } catch {
+          /* not in Node — ignore */
+        }
+      }
 
       this.logs.setOnLogBreadcrumb((level, message) => {
         const bcLevel = level === 'warn' ? 'warn' : 'error';
@@ -190,11 +216,30 @@ export class AllStakClient {
     this.errors.clearBreadcrumbs();
   }
 
+  /**
+   * Capture a freeform message. Routes to the **logs** ingest stream by default
+   * (so messages appear in the dashboard's "Logs" view and don't pollute the
+   * Errors view). For severities >= warning, it ALSO writes to errors so the
+   * message is visible alongside real exceptions when triaging.
+   *
+   * Pass `{ as: 'error' }` to send only to the errors stream (preserves the
+   * legacy behaviour for callers that need it).
+   */
   captureMessage(
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
+    options: { as?: 'log' | 'error' | 'both' } = {},
   ): void {
-    this.errors.captureMessage(message, level);
+    const as = options.as ?? (level === 'fatal' || level === 'error' ? 'both' : 'log');
+    if (as === 'log' || as === 'both') {
+      // Map error->error, warning->warn, fatal->fatal, info->info
+      const logLevel = (level === 'warning' ? 'warn' : level) as
+        'debug' | 'info' | 'warn' | 'error' | 'fatal';
+      this.logs.send(logLevel, message);
+    }
+    if (as === 'error' || as === 'both') {
+      this.errors.captureMessage(message, level);
+    }
   }
 
   /**

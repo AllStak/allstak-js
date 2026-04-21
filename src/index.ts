@@ -44,11 +44,18 @@ export const AllStak = {
     ensureInit().clearBreadcrumbs();
   },
 
+  /**
+   * Capture a freeform message. By default routes to the **logs** stream
+   * (so it shows up under "Logs" in the dashboard). For `error` / `fatal`
+   * severities it ALSO writes to the errors stream so the message is visible
+   * during incident triage. Override with `{ as: 'log' | 'error' | 'both' }`.
+   */
   captureMessage(
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
+    options?: { as?: 'log' | 'error' | 'both' },
   ): void {
-    ensureInit().captureMessage(message, level);
+    ensureInit().captureMessage(message, level, options);
   },
 
   /**

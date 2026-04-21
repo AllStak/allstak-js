@@ -17,6 +17,8 @@ export default defineConfig([
       express: 'src/integrations/express.ts',
       cron: 'src/integrations/cron.ts',
       db: 'src/integrations/db/index.ts',
+      react: 'src/integrations/react.tsx',
+      'react-native': 'src/integrations/react-native.ts',
     },
     format: ['cjs', 'esm'],
     dts: true,
@@ -24,6 +26,7 @@ export default defineConfig([
     platform: 'browser',
     outDir: 'dist/browser',
     clean: true,
+    external: ['react', 'react-dom', 'react-native', 'promise/setimmediate/rejection-tracking'],
   },
   {
     entry: {

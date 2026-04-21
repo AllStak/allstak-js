@@ -24,6 +24,14 @@ export interface Breadcrumb {
 }
 
 // Matches backend ErrorIngestRequest DTO
+interface ErrorRequestContext {
+  method?: string;
+  path?: string;
+  host?: string;
+  statusCode?: number;
+  userAgent?: string;
+}
+
 interface ErrorIngestPayload {
   exceptionClass: string;
   message: string;
@@ -32,9 +40,21 @@ interface ErrorIngestPayload {
   environment?: string;
   release?: string;
   sessionId?: string;
+  traceId?: string;
   user?: { id?: string; email?: string; ip?: string };
   metadata?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
+  requestContext?: ErrorRequestContext;
+}
+
+function browserRequestContext(): ErrorRequestContext | undefined {
+  if (typeof window === 'undefined' || typeof location === 'undefined') return undefined;
+  return {
+    method: 'GET',
+    path: location.pathname || '/',
+    host: location.host || '',
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+  };
 }
 
 const INGEST_PATH = '/ingest/v1/errors';
@@ -102,6 +122,7 @@ export class ErrorModule {
       user: this.config.user,
       metadata: context ? { ...this.config.tags, ...context } : this.config.tags,
       breadcrumbs: currentBreadcrumbs,
+      requestContext: browserRequestContext(),
     };
 
     this.transport.send(INGEST_PATH, payload);
@@ -120,6 +141,7 @@ export class ErrorModule {
       sessionId: this.sessionId,
       user: this.config.user,
       metadata: this.config.tags,
+      requestContext: browserRequestContext(),
     };
 
     this.transport.send(INGEST_PATH, payload);

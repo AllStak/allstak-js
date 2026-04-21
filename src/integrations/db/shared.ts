@@ -190,7 +190,9 @@ export function tryRequire<T = unknown>(name: string): T | null {
   try {
     return req(name) as T;
   } catch (e) {
-    if (process?.env?.ALLSTAK_DB_DEBUG === '1') {
+    // Guarded access: `process` is undeclared in browsers and would throw
+    // ReferenceError (optional chaining does not guard against this).
+    if (typeof process !== 'undefined' && process?.env?.ALLSTAK_DB_DEBUG === '1') {
       // eslint-disable-next-line no-console
       console.error(`[allstak-db] tryRequire('${name}') failed:`, (e as Error).message);
     }

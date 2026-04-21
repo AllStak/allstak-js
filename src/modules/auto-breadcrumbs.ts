@@ -12,10 +12,29 @@ type AddBreadcrumbFn = (
   data?: Record<string, unknown>,
 ) => void;
 
+type CaptureRequestFn = (item: {
+  direction: 'outbound';
+  method: string;
+  host: string;
+  path: string;
+  statusCode: number;
+  durationMs: number;
+  requestSize?: number;
+  responseSize?: number;
+  traceId?: string;
+}) => void;
+
 /**
- * Wrap `globalThis.fetch` to record HTTP breadcrumbs for every request.
+ * Wrap `globalThis.fetch` to record HTTP breadcrumbs AND ship the request
+ * to /ingest/v1/http-requests so it shows up on the Requests dashboard.
+ *
+ * Own-ingest POSTs (to the SDK baseUrl) are skipped to avoid recursion.
  */
-export function instrumentFetch(addBreadcrumb: AddBreadcrumbFn): void {
+export function instrumentFetch(
+  addBreadcrumb: AddBreadcrumbFn,
+  captureRequest?: CaptureRequestFn,
+  ownBaseUrl?: string,
+): void {
   if (typeof globalThis.fetch !== 'function') return;
 
   const originalFetch = globalThis.fetch;
@@ -34,6 +53,18 @@ export function instrumentFetch(addBreadcrumb: AddBreadcrumbFn): void {
     // Strip query string to avoid leaking sensitive params
     const safePath = url.split('?')[0];
 
+    const isOwnIngest = ownBaseUrl && url.startsWith(ownBaseUrl);
+
+    let host = '';
+    let path = safePath;
+    try {
+      const u = new URL(url, typeof location !== 'undefined' ? location.href : 'http://localhost');
+      host = u.host;
+      path = u.pathname || '/';
+    } catch {
+      /* ignore */
+    }
+
     const start = Date.now();
     try {
       const response = await originalFetch.call(this, input, init);
@@ -44,6 +75,20 @@ export function instrumentFetch(addBreadcrumb: AddBreadcrumbFn): void {
         response.status >= 400 ? 'error' : 'info',
         { method, url: safePath, statusCode: response.status, durationMs },
       );
+      if (captureRequest && !isOwnIngest) {
+        try {
+          captureRequest({
+            direction: 'outbound',
+            method,
+            host,
+            path,
+            statusCode: response.status,
+            durationMs,
+          });
+        } catch {
+          /* never break host */
+        }
+      }
       return response;
     } catch (err) {
       const durationMs = Date.now() - start;
@@ -53,6 +98,20 @@ export function instrumentFetch(addBreadcrumb: AddBreadcrumbFn): void {
         error: String(err),
         durationMs,
       });
+      if (captureRequest && !isOwnIngest) {
+        try {
+          captureRequest({
+            direction: 'outbound',
+            method,
+            host,
+            path,
+            statusCode: 0,
+            durationMs,
+          });
+        } catch {
+          /* never break host */
+        }
+      }
       throw err;
     }
   };

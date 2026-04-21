@@ -4,7 +4,13 @@ Official JavaScript/TypeScript SDK for [AllStak](https://allstak.io). Drop-in ob
 
 ## 1. What you get
 
-**One package. One API key. Zero code changes for the basics.** After adding the SDK to your Node app and dropping in the Express middleware, every unhandled error, every inbound HTTP request, every WARN/ERROR log line, every DB query (via the optional `pg`/`mysql2` instrumentation), and every outbound webhook is automatically captured and shipped to AllStak.
+**One package. One API key.** What you get *automatically* from `AllStak.init(apiKey)` alone:
+- every uncaught exception and unhandled promise rejection (Node) / `window.onerror` + `unhandledrejection` (browser);
+- every outbound HTTP call — `fetch`, `node:http`, `node:https`, and anything that goes through them (axios, got, node-fetch, etc.);
+- `console.warn` / `console.error` as breadcrumbs;
+- `environment` / `release` / `tags` stamped on every captured event.
+
+What you have to wire *manually* (one line each — see the table in §6): inbound HTTP via `allstakExpress.requestHandler()`; thrown-route-errors via `allstakExpress.errorHandler()`; DB queries via `allstak-js/db`; cron heartbeats via `allstak-js/cron`. The dashboard reflects exactly what you wire — nothing is silently missing or partially captured.
 
 ## 2. Install
 
@@ -88,20 +94,25 @@ The SDK installs Node `uncaughtException` and `unhandledRejection` listeners aut
 
 ## 6. What gets captured automatically
 
-| Feature | Where | Default |
+This table is the single source of truth — runtime-verified against the live AllStak backend. "Auto" means `AllStak.init(...)` alone is enough; "Manual" means you must call an SDK method or mount a helper.
+
+| Feature | Auto vs Manual | Verified |
 |---|---|---|
-| `uncaughtException` + `unhandledRejection` | Node `process.on(...)` | ✅ on (Node) |
-| `window.onerror` + `unhandledrejection` | Browser `window.addEventListener(...)` | ✅ on (browser) |
-| `console.warn` / `console.error` → breadcrumbs | Auto-instrumented | ✅ on |
-| `fetch()` → breadcrumbs | Auto-instrumented | ✅ on |
-| Inbound HTTP requests | `allstakExpress.requestHandler()` | manual mount |
-| Express thrown errors | `allstakExpress.errorHandler()` | manual mount |
-| Per-request trace span | Started in `requestHandler` | manual mount |
-| Authenticated user (`req.user`) | `requestHandler` | auto |
-| `pg` / `mysql2` / `sqlite` queries | `allstak-js` auto-instrumentation hook | ✅ on (Node) |
-| Prisma / Sequelize / Mongoose / MongoDB queries | `allstak-js/db` opt-in helpers | manual wire-up |
-| Browser session replay | `sessionReplay.enabled: true` | opt-in |
-| Scheduled task heartbeats | `monitor()` from `allstak-js/cron` | manual wrap |
+| `uncaughtException` (Node) | **Auto** via `process.on('uncaughtException')` | ✅ |
+| `unhandledRejection` (Node) | **Auto** via `process.on('unhandledRejection')` | ✅ |
+| `window.onerror` + `unhandledrejection` (Browser) | **Auto** via `window.addEventListener` | ✅ |
+| Outbound `fetch()` → records to `/ingest/v1/http-requests` AND breadcrumb | **Auto** | ✅ |
+| Outbound `node:http` / `node:https` (covers axios, got, node-fetch, native) | **Auto** | ✅ |
+| `console.warn` / `console.error` → breadcrumbs | **Auto** | ✅ |
+| Inbound HTTP (Express) | **Manual** — register `allstakExpress.requestHandler()` BEFORE your routes (Express middleware order matters) | ✅ when wired |
+| Express thrown errors | **Manual** — register `allstakExpress.errorHandler()` AFTER your routes | ✅ |
+| Per-request trace span | Manual — started inside `requestHandler` | ✅ |
+| `pg` / `mysql2` / `sqlite` queries | **Manual** — opt-in via `allstak-js/db` helpers (`installPg(pool, ...)`, etc.). The earlier README claim of zero-config DB auto-instrumentation was wrong; tracked as a follow-up. | ✅ when wired |
+| Prisma / Sequelize / Mongoose / MongoDB queries | Manual — `allstak-js/db` opt-in helpers | ✅ when wired |
+| `captureMessage(...)` | Routes to **logs** by default (`info`/`warning`); to **logs + errors** for `error`/`fatal`. Override with `{ as: 'log' \| 'error' \| 'both' }`. | ✅ |
+| Browser session replay | Opt-in via `sessionReplay.enabled: true` | source-only |
+| Scheduled task heartbeats | Manual — `monitor()` from `allstak-js/cron` | ✅ when wired |
+| `environment` / `release` / `tags` on every event | **Auto** from `init()` config (also stamped on http_requests as of v0.x — earlier versions lost these tags on http rows) | ✅ |
 
 Each automatic feature can be turned off via the `AllStak.init()` config:
 

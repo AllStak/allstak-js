@@ -45,7 +45,27 @@
       "require": "./dist/node/db.js",
       "default": "./dist/node/db.mjs"
     },
+    "./react": {
+      "types": "./dist/browser/react.d.ts",
+      "import": "./dist/browser/react.mjs",
+      "require": "./dist/browser/react.js",
+      "default": "./dist/browser/react.mjs"
+    },
+    "./react-native": {
+      "types": "./dist/browser/react-native.d.ts",
+      "import": "./dist/browser/react-native.mjs",
+      "require": "./dist/browser/react-native.js",
+      "default": "./dist/browser/react-native.mjs"
+    },
     "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "react": ">=16.8.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "files": [
     "dist",
@@ -95,11 +115,13 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/react": "^18.3.28",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
     "eslint": "^8.56.0",
     "jsdom": "^29.0.1",
     "prettier": "^3.2.0",
+    "react": "^18.3.1",
     "tsup": "^8.0.0",
     "typescript": "^5.3.0",
     "vitest": "^1.2.0"

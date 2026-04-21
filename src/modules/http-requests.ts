@@ -32,6 +32,9 @@ interface HttpRequestIngestItem {
   responseSize?: number;
   userId?: string;
   errorFingerprint?: string;
+  /** Per-request env / release for accurate filtering on the dashboard. */
+  environment?: string;
+  release?: string;
   timestamp: string;
 }
 
@@ -60,9 +63,15 @@ export class HttpRequestModule {
   private queue: HttpRequestIngestItem[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private onCapture: OnCaptureBreadcrumb | null = null;
+  private defaults: { environment?: string; release?: string } = {};
 
   constructor(private transport: HttpTransport) {
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+  }
+
+  /** Apply environment / release tags to every captured request. */
+  setDefaults(defaults: { environment?: string; release?: string }): void {
+    this.defaults = { ...this.defaults, ...defaults };
   }
 
   /**
@@ -93,6 +102,8 @@ export class HttpRequestModule {
       responseSize: item.responseSize,
       userId: item.userId,
       errorFingerprint: item.errorFingerprint,
+      environment: this.defaults.environment,
+      release: this.defaults.release,
       timestamp: item.timestamp ?? new Date().toISOString(),
     });
 
