@@ -76,7 +76,8 @@
     "lint": "eslint src",
     "format": "prettier --write src",
     "clean": "rm -rf dist",
-    "prepublishOnly": "tsup"
+    "prepublishOnly": "tsup",
+    "prepare": "tsup"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
