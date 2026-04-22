@@ -17,7 +17,7 @@ import { generateId } from './utils/uuid';
  * the SDK at a different deployment (e.g. self-hosted), set the optional
  * {@link AllStakConfig#host} field.
  */
-export const INGEST_HOST = 'https://api.allstak.io';
+export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Surfaced internally; not currently sent on the wire. */
 export const SDK_VERSION = '1.1.0';
