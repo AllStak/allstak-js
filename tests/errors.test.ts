@@ -43,11 +43,11 @@ describe('Error Module', () => {
 
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.exceptionClass).toBe('Message');
-    expect(body.level).toBe('warning');
+    const [url, options] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/ingest/v1/logs');
+    const body = JSON.parse(options.body);
+    expect(body.level).toBe('warn');
     expect(body.message).toBe('Disk space low');
-    expect(body.stackTrace).toBeUndefined();
   });
 
   it('auto-captures window.onerror', async () => {
@@ -87,15 +87,30 @@ describe('Error Module', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('includes user and tags when set', async () => {
+  it('captureMessage routes to logs endpoint with user id', async () => {
     AllStak.setUser({ id: '123', email: 'test@example.com' });
     AllStak.setTag('component', 'auth');
     AllStak.captureMessage('test', 'info');
 
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
 
+    const [url, options] = fetchSpy.mock.calls[0];
+    expect(url).toContain('/ingest/v1/logs');
+    const body = JSON.parse(options.body);
+    expect(body.level).toBe('info');
+    expect(body.message).toBe('test');
+    expect(body.userId).toBe('123');
+  });
+
+  it('captureException includes user via userId on log payload', async () => {
+    AllStak.setUser({ id: '123', email: 'test@example.com' });
+    AllStak.setTag('component', 'auth');
+    AllStak.captureException(new Error('boom'), { route: '/api/x' });
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.user).toEqual({ id: '123', email: 'test@example.com' });
-    expect(body.metadata).toEqual({ component: 'auth' });
+    expect(body.metadata).toMatchObject({ component: 'auth', route: '/api/x' });
   });
 });

@@ -20,6 +20,7 @@ interface LogIngestPayload {
   service?: string;
   traceId?: string;
   environment?: string;
+  release?: string;
   spanId?: string;
   requestId?: string;
   userId?: string;
@@ -60,6 +61,7 @@ export class LogModule {
       service: (meta?.service as string | undefined) ?? this.config.tags?.service,
       traceId: meta?.traceId as string | undefined,
       environment: (meta?.environment as string | undefined) ?? this.config.environment,
+      release: (meta?.release as string | undefined) ?? this.config.release,
       spanId: meta?.spanId as string | undefined,
       requestId: meta?.requestId as string | undefined,
       userId: (meta?.userId as string | undefined) ?? this.config.user?.id,
