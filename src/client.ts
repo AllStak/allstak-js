@@ -19,10 +19,40 @@ import { generateId } from './utils/uuid';
  */
 export const INGEST_HOST = 'https://api.allstak.sa';
 
-/** SDK semver. Surfaced internally; not currently sent on the wire. */
-export const SDK_VERSION = '1.1.0';
+/** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
+export const SDK_VERSION = '1.2.0';
+/** SDK package name. Sent on the wire as `sdk.name`. */
+export const SDK_NAME = 'allstak-js';
 
-export interface AllStakConfig {
+/**
+ * Release-tracking metadata. All fields are optional — the SDK auto-detects
+ * sensible defaults from the runtime environment when possible:
+ *
+ * - `release`     ← `process.env.ALLSTAK_RELEASE`, then `npm_package_version`
+ * - `commitSha`   ← `process.env.ALLSTAK_COMMIT_SHA`, `GIT_COMMIT`, `VERCEL_GIT_COMMIT_SHA`,
+ *                   `RAILWAY_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`
+ * - `branch`      ← `process.env.ALLSTAK_BRANCH`, `GIT_BRANCH`, `VERCEL_GIT_COMMIT_REF`
+ * - `dist`        ← (none — must be set explicitly when bundling multiple builds per release)
+ * - `platform`    ← `'browser'` if `window` is defined, else `'node'`
+ *
+ * Explicit values in {@link AllStakConfig} always override auto-detection.
+ */
+export interface ReleaseMetadata {
+  /** Build distribution tag (e.g. `'ios'`, `'android'`, `'web'`). */
+  dist?: string;
+  /** Git commit SHA the running build was built from. */
+  commitSha?: string;
+  /** Git branch the running build was built from. */
+  branch?: string;
+  /** Runtime platform — auto-detected as `'browser'` or `'node'`. */
+  platform?: string;
+  /** SDK package name — defaults to `allstak-js`. */
+  sdkName?: string;
+  /** SDK semver — defaults to {@link SDK_VERSION}. */
+  sdkVersion?: string;
+}
+
+export interface AllStakConfig extends ReleaseMetadata {
   /**
    * Project API key from the AllStak dashboard (`ask_live_…`).
    * Required.
@@ -64,6 +94,62 @@ interface ParsedConfig {
   apiKey: string;
 }
 
+/**
+ * Read an env var safely. Returns `undefined` in browsers (where `process` is
+ * not defined) and in any environment where the variable is unset/empty. We
+ * never throw — release-metadata auto-detection is best-effort.
+ */
+function envVar(name: string): string | undefined {
+  try {
+    if (typeof process !== 'undefined' && process.env) {
+      const v = process.env[name];
+      if (v && v.length > 0) return v;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+/**
+ * Apply release-metadata auto-detection to a config object, mutating it in
+ * place. Explicit user values always win. Auto-detected values come from
+ * conventional CI/runtime env vars (Vercel, Railway, Render, plain GIT_*).
+ */
+export function applyReleaseAutodetect(config: AllStakConfig): void {
+  const isBrowser = typeof window !== 'undefined';
+  if (!config.platform) config.platform = isBrowser ? 'browser' : 'node';
+  if (!config.sdkName) config.sdkName = SDK_NAME;
+  if (!config.sdkVersion) config.sdkVersion = SDK_VERSION;
+
+  if (!config.release) {
+    config.release =
+      envVar('ALLSTAK_RELEASE') ??
+      envVar('npm_package_version') ??
+      envVar('VERCEL_GIT_COMMIT_SHA')?.slice(0, 12) ??
+      envVar('RAILWAY_GIT_COMMIT_SHA')?.slice(0, 12) ??
+      envVar('RENDER_GIT_COMMIT')?.slice(0, 12);
+  }
+  if (!config.commitSha) {
+    config.commitSha =
+      envVar('ALLSTAK_COMMIT_SHA') ??
+      envVar('GIT_COMMIT') ??
+      envVar('VERCEL_GIT_COMMIT_SHA') ??
+      envVar('RAILWAY_GIT_COMMIT_SHA') ??
+      envVar('RENDER_GIT_COMMIT');
+  }
+  if (!config.branch) {
+    config.branch =
+      envVar('ALLSTAK_BRANCH') ??
+      envVar('GIT_BRANCH') ??
+      envVar('VERCEL_GIT_COMMIT_REF') ??
+      envVar('RAILWAY_GIT_BRANCH');
+  }
+  if (!config.environment) {
+    config.environment = envVar('ALLSTAK_ENVIRONMENT') ?? envVar('NODE_ENV') ?? 'production';
+  }
+}
+
 function resolveTransport(config: AllStakConfig): ParsedConfig {
   // New (recommended) shape: { apiKey, host? }
   if (config.apiKey) {
@@ -95,6 +181,7 @@ export class AllStakClient {
   private sessionId: string;
 
   constructor(config: AllStakConfig) {
+    applyReleaseAutodetect(config);
     this.config = config;
     this.sessionId = generateId();
     const { baseUrl, apiKey } = resolveTransport(config);
@@ -312,6 +399,19 @@ export class AllStakClient {
   setTag(key: string, value: string): void {
     if (!this.config.tags) this.config.tags = {};
     this.config.tags[key] = value;
+  }
+
+  /**
+   * Phase 3 — runtime override of the SDK identity fields. Used by
+   * platform-specific integrations (e.g. installReactNative) so the
+   * resulting wire payload says `sdkName=allstak-react-native` and
+   * carries an auto-detected `dist` such as `ios-hermes`.
+   */
+  setIdentity(identity: { sdkName?: string; sdkVersion?: string; platform?: string; dist?: string }): void {
+    if (identity.sdkName)    this.config.sdkName    = identity.sdkName
+    if (identity.sdkVersion) this.config.sdkVersion = identity.sdkVersion
+    if (identity.platform)   this.config.platform   = identity.platform
+    if (identity.dist)       this.config.dist       = identity.dist
   }
 
   getSessionId(): string {

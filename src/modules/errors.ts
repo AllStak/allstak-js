@@ -1,5 +1,7 @@
 import { HttpTransport } from '../transport/http';
-import { AllStakConfig } from '../client';
+import { AllStakConfig, SDK_NAME, SDK_VERSION } from '../client';
+import { parseStack } from '../utils/stack';
+import { resolveDebugId } from '../utils/debug-id';
 
 export interface ErrorEvent {
   type: 'error';
@@ -32,10 +34,40 @@ interface ErrorRequestContext {
   userAgent?: string;
 }
 
+/**
+ * v2 frame shape — matches backend {@code ErrorIngestRequest.Frame}.
+ * Sent alongside the legacy `stackTrace` string list so older backends
+ * keep working unchanged; new backends prefer `frames` when present.
+ */
+interface PayloadFrame {
+  filename?: string;
+  absPath?: string;
+  function?: string;
+  lineno?: number;
+  colno?: number;
+  inApp?: boolean;
+  platform?: string;
+  debugId?: string;
+}
+
+interface PayloadDebugImage {
+  type?: string;
+  debugId?: string;
+  codeFile?: string;
+  imageAddr?: string;
+}
+
 interface ErrorIngestPayload {
   exceptionClass: string;
   message: string;
   stackTrace?: string[];
+  // ── v2 ingest fields (additive, optional) ─────────────────────
+  frames?: PayloadFrame[];
+  debugMeta?: { images?: PayloadDebugImage[] };
+  platform?: string;
+  sdkName?: string;
+  sdkVersion?: string;
+  dist?: string;
   level: string;
   environment?: string;
   release?: string;
@@ -45,6 +77,30 @@ interface ErrorIngestPayload {
   metadata?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
   requestContext?: ErrorRequestContext;
+}
+
+/**
+ * Detect the runtime so the SDK can stamp `platform` even when the
+ * customer hasn't configured it explicitly. React Native is identified
+ * by Hermes' global, browser by `window`, otherwise Node.
+ */
+function detectPlatform(): string {
+  if (typeof (globalThis as { HermesInternal?: unknown }).HermesInternal !== 'undefined') return 'react-native';
+  if (typeof window !== 'undefined') return 'browser';
+  return 'node';
+}
+
+/**
+ * Render a structured frame back to a `"at fn (file:line:col)"` line so
+ * older backends that only look at `stackTrace[]` still get a useful
+ * representation. Coordinates match what V8 would have printed.
+ */
+function frameToString(f: PayloadFrame): string {
+  const fn = f.function && f.function.length > 0 ? f.function : '<anonymous>';
+  const file = f.filename || f.absPath || '<anonymous>';
+  const line = typeof f.lineno === 'number' ? f.lineno : 0;
+  const col = typeof f.colno === 'number' ? f.colno : 0;
+  return `    at ${fn} (${file}:${line}:${col})`;
 }
 
 function browserRequestContext(): ErrorRequestContext | undefined {
@@ -101,11 +157,58 @@ export class ErrorModule {
     this.breadcrumbs = [];
   }
 
+  /**
+   * Build the release-metadata block we attach to every event. Backend stores
+   * `release` + `environment` as first-class fields; the rest (sdk.name,
+   * sdk.version, platform, dist, commitSha, branch) ride along inside
+   * `metadata` so they survive the wire even before the backend has dedicated
+   * columns. Once those columns land, the ingester reads them out of metadata.
+   */
+  private releaseTags(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (this.config.sdkName) out['sdk.name'] = this.config.sdkName;
+    if (this.config.sdkVersion) out['sdk.version'] = this.config.sdkVersion;
+    if (this.config.platform) out['platform'] = this.config.platform;
+    if (this.config.dist) out['dist'] = this.config.dist;
+    if (this.config.commitSha) out['commit.sha'] = this.config.commitSha;
+    if (this.config.branch) out['commit.branch'] = this.config.branch;
+    return out;
+  }
+
   captureException(error: Error, context?: Record<string, unknown>): void {
-    const stackLines = error.stack
-      ?.split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('at ')) ?? [];
+    // Parse the engine-native stack into structured frames. Falls back
+    // to an empty list if the runtime didn't populate `error.stack`.
+    const parsed = parseStack(error.stack);
+    const platform = this.config.platform || detectPlatform();
+    const frames: PayloadFrame[] = parsed.map((f) => ({
+      filename: f.filename,
+      absPath: f.absPath,
+      function: f.function,
+      lineno: f.lineno,
+      colno: f.colno,
+      inApp: f.inApp,
+      platform,
+      // Try to attribute the frame to a specific bundle's debug-id so
+      // the symbolicator can pick the right map. Reads either the
+      // browser registry (`globalThis._allstakDebugIds`) or the bundle
+      // file directly (Node). Cached per filename — repeated frames
+      // pointing at the same bundle hit the cache.
+      debugId: resolveDebugId(f.filename),
+    }));
+
+    // Aggregate unique debug-ids into the per-event debugMeta.images[]
+    // table. Sentry-compatible shape; the symbolicator can match by
+    // image-level debugId even when individual frames lack one.
+    const debugIdSet = new Set<string>();
+    for (const f of frames) if (f.debugId) debugIdSet.add(f.debugId);
+    const debugMeta = debugIdSet.size > 0
+      ? { images: Array.from(debugIdSet).map((id) => ({ type: 'sourcemap', debugId: id })) }
+      : undefined;
+
+    // Keep the v1 string list populated so older backends still ingest.
+    // We synthesise it from the structured frames for consistency rather
+    // than re-splitting the raw stack — fewer divergent code paths.
+    const stackTrace = frames.length > 0 ? frames.map(frameToString) : undefined;
 
     // Drain breadcrumbs and attach to the error payload
     const currentBreadcrumbs = this.breadcrumbs.length > 0 ? [...this.breadcrumbs] : undefined;
@@ -114,13 +217,23 @@ export class ErrorModule {
     const payload: ErrorIngestPayload = {
       exceptionClass: error.constructor?.name || error.name || 'Error',
       message: error.message,
-      stackTrace: stackLines.length > 0 ? stackLines : undefined,
+      stackTrace,
+      frames: frames.length > 0 ? frames : undefined,
+      debugMeta,
+      // SDK identity — promoted to first-class wire fields so the
+      // backend's existing platform/sdk_name/sdk_version columns are
+      // populated for every event without depending on User-Agent
+      // sniffing or the metadata bag.
+      platform,
+      sdkName: this.config.sdkName ?? SDK_NAME,
+      sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
+      dist: this.config.dist,
       level: 'error',
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: context ? { ...this.config.tags, ...context } : this.config.tags,
+      metadata: { ...this.releaseTags(), ...this.config.tags, ...(context ?? {}) },
       breadcrumbs: currentBreadcrumbs,
       requestContext: browserRequestContext(),
     };
@@ -132,15 +245,20 @@ export class ErrorModule {
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
   ): void {
+    const platform = this.config.platform || detectPlatform();
     const payload: ErrorIngestPayload = {
       exceptionClass: 'Message',
       message,
+      platform,
+      sdkName: this.config.sdkName ?? SDK_NAME,
+      sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
+      dist: this.config.dist,
       level,
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: this.config.tags,
+      metadata: { ...this.releaseTags(), ...this.config.tags },
       requestContext: browserRequestContext(),
     };
 

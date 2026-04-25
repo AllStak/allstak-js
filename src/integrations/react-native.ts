@@ -158,6 +158,28 @@ export function installReactNative(options: ReactNativeInstallOptions = {}): voi
 
   AllStak.setTag('platform', 'react-native');
 
+  // Phase 3 — SDK identity + auto-detected dist. The resulting wire
+  // payload will land in ClickHouse with sdk_name=allstak-react-native
+  // and dist=ios-hermes / android-hermes (or -jsc for the legacy engine).
+  try {
+    const hermes = typeof (globalThis as { HermesInternal?: unknown }).HermesInternal !== 'undefined';
+    let dist: string | undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const rn = require('react-native');
+      const os = rn?.Platform?.OS as string | undefined;
+      if (os === 'ios' || os === 'android') {
+        dist = `${os}-${hermes ? 'hermes' : 'jsc'}`;
+      }
+    } catch { /* not running under RN */ }
+    AllStak.setIdentity({
+      sdkName: 'allstak-react-native',
+      sdkVersion: '1.2.0',
+      platform: 'react-native',
+      dist,
+    });
+  } catch { /* never break init */ }
+
   if (autoNetwork) {
     try { instrumentXmlHttpRequest(); } catch { /* not in JS env */ }
   }

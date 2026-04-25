@@ -102,6 +102,39 @@ describe('Error Module', () => {
     expect(body.userId).toBe('123');
   });
 
+  it('captureException emits v2 structured frames + sdk identity', async () => {
+    const error = new Error('v2 frame test');
+    AllStak.captureException(error);
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+
+    // v2 contract: structured frames present
+    expect(Array.isArray(body.frames)).toBe(true);
+    expect(body.frames.length).toBeGreaterThan(0);
+    const top = body.frames[0];
+    expect(top).toEqual(
+      expect.objectContaining({
+        filename: expect.any(String),
+        lineno: expect.any(Number),
+        colno: expect.any(Number),
+        platform: expect.any(String),
+      }),
+    );
+
+    // SDK identity promoted to first-class fields
+    expect(body.sdkName).toBe('allstak-js');
+    expect(typeof body.sdkVersion).toBe('string');
+    expect(body.sdkVersion.length).toBeGreaterThan(0);
+    expect(['browser', 'node', 'react-native']).toContain(body.platform);
+
+    // v1 back-compat: stackTrace[] still populated, derived from frames
+    expect(Array.isArray(body.stackTrace)).toBe(true);
+    expect(body.stackTrace.length).toBe(body.frames.length);
+    expect(body.stackTrace[0]).toMatch(/^ {4}at .+ \(.+:\d+:\d+\)$/);
+  });
+
   it('captureException includes user via userId on log payload', async () => {
     AllStak.setUser({ id: '123', email: 'test@example.com' });
     AllStak.setTag('component', 'auth');

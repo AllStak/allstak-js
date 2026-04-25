@@ -44,6 +44,11 @@ export const AllStak = {
     ensureInit().clearBreadcrumbs();
   },
 
+  /** Phase 3 — runtime SDK-identity override (used by RN install). */
+  setIdentity(identity: { sdkName?: string; sdkVersion?: string; platform?: string; dist?: string }): void {
+    ensureInit().setIdentity(identity);
+  },
+
   /**
    * Capture a freeform message. By default routes to the **logs** stream
    * (so it shows up under "Logs" in the dashboard). For `error` / `fatal`
