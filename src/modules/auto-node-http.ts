@@ -172,8 +172,9 @@ export function instrumentNodeHttp(
     // node's `http.get(...)` is a convenience: `request(...).end()`. It
     // captures `module.request` at module-load time, so re-routing it through
     // the patched `mod.request` requires us to also override `mod.get`.
-    const originalGet = mod.get?.bind(mod);
-    if (originalGet) {
+    let originalGet: PatchableModule['get'] | undefined;
+    if (typeof mod.get === 'function') {
+      originalGet = mod.get.bind(mod) as PatchableModule['get'];
       mod.get = function patchedGet(...args: unknown[]): ClientRequest {
         const req = (mod.request as (...a: unknown[]) => ClientRequest)(...args);
         req.end();
