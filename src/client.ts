@@ -68,6 +68,25 @@ export interface AllStakConfig extends ReleaseMetadata {
   release?: string;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
+  /** Per-event extra data attached to every capture (override per call via context arg). */
+  extras?: Record<string, unknown>;
+  /** Named context bags (e.g. `app`, `device`). Each lives under `metadata['context.<name>']`. */
+  contexts?: Record<string, Record<string, unknown>>;
+  /** Default severity level for events that don't specify their own. */
+  level?: 'fatal' | 'error' | 'warning' | 'info' | 'debug';
+  /** Custom grouping fingerprint applied to every event. */
+  fingerprint?: string[];
+  /**
+   * Probability in [0, 1] that any given error is sent. Default: 1 (no sampling).
+   * Applied per event before {@link beforeSend}.
+   */
+  sampleRate?: number;
+  /**
+   * Mutate or drop an event before it is sent. Return `null` (or a falsy
+   * value) to drop. Sync or async. Errors thrown inside the hook are caught —
+   * the original event is sent so a buggy hook can't black-hole telemetry.
+   */
+  beforeSend?: (event: any) => any | null | undefined | Promise<any | null | undefined>;
   /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
   autoBreadcrumbs?: boolean;
   /** Enable automatic database instrumentation for pg and mysql2. Default: true */
@@ -399,6 +418,61 @@ export class AllStakClient {
   setTag(key: string, value: string): void {
     if (!this.config.tags) this.config.tags = {};
     this.config.tags[key] = value;
+  }
+
+  /** Bulk-set tags. Merges with existing tags. */
+  setTags(tags: Record<string, string>): void {
+    if (!this.config.tags) this.config.tags = {};
+    Object.assign(this.config.tags, tags);
+  }
+
+  /** Set a single extra value. */
+  setExtra(key: string, value: unknown): void {
+    if (!this.config.extras) this.config.extras = {};
+    this.config.extras[key] = value;
+  }
+
+  /** Bulk-set extras. Merges with existing extras. */
+  setExtras(extras: Record<string, unknown>): void {
+    if (!this.config.extras) this.config.extras = {};
+    Object.assign(this.config.extras, extras);
+  }
+
+  /**
+   * Attach a named context bag (e.g. `app`, `device`, `runtime`) that appears
+   * under `metadata['context.<name>']` on every subsequent event. Pass
+   * `null` to remove a previously-set context.
+   */
+  setContext(name: string, ctx: Record<string, unknown> | null): void {
+    if (!this.config.contexts) this.config.contexts = {};
+    if (ctx === null) delete this.config.contexts[name];
+    else this.config.contexts[name] = ctx;
+  }
+
+  /** Set the default severity level applied to subsequent captures. */
+  setLevel(level: 'fatal' | 'error' | 'warning' | 'info' | 'debug'): void {
+    this.config.level = level;
+  }
+
+  /**
+   * Set a custom grouping fingerprint applied to subsequent events.
+   * Pass `null` or an empty array to clear and revert to default grouping.
+   */
+  setFingerprint(fingerprint: string[] | null): void {
+    this.config.fingerprint = fingerprint && fingerprint.length > 0 ? fingerprint : undefined;
+  }
+
+  /**
+   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   */
+  async flush(timeoutMs = 2000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.transport.getBufferSize() > 0) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return true;
   }
 
   /**

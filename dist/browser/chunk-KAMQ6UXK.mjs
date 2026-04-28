@@ -1,12 +1,10 @@
-import { createRequire as __allstakCreateRequire } from 'node:module';
-const require = __allstakCreateRequire(import.meta.url);
 import {
   __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-NY4SCN2B.mjs";
+} from "./chunk-46REABUF.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -107,7 +105,126 @@ var HttpTransport = class {
   }
 };
 
+// src/utils/stack.ts
+var V8_FRAME_RE = /^\s*at\s+(?:(.+?)\s+\()?((?:.+?):(\d+):(\d+))\)?\s*$/;
+var GECKO_FRAME_RE = /^\s*(?:(.*?)@)?(.+?):(\d+):(\d+)\s*$/;
+var NODE_INTERNAL_RE = /^(node:|internal\/|node_modules\/)/;
+function parseStack(stack) {
+  if (!stack || typeof stack !== "string") return [];
+  const lines = stack.split("\n");
+  const frames = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    let m = V8_FRAME_RE.exec(line);
+    if (m) {
+      const fn = m[1] ? m[1].trim() : void 0;
+      const loc = m[2];
+      const lineno = parseInt(m[3], 10);
+      const colno = parseInt(m[4], 10);
+      const filename = stripQueryHash(loc.replace(/:\d+:\d+$/, ""));
+      frames.push({
+        filename,
+        absPath: filename,
+        function: fn,
+        lineno,
+        colno,
+        inApp: isInApp(filename)
+      });
+      continue;
+    }
+    m = GECKO_FRAME_RE.exec(line);
+    if (m && m[2]) {
+      const fn = m[1] ? m[1].trim() : void 0;
+      const filename = stripQueryHash(m[2]);
+      frames.push({
+        filename,
+        absPath: filename,
+        function: fn || void 0,
+        lineno: parseInt(m[3], 10),
+        colno: parseInt(m[4], 10),
+        inApp: isInApp(filename)
+      });
+    }
+  }
+  return frames;
+}
+function stripQueryHash(url) {
+  const q = url.indexOf("?");
+  const h = url.indexOf("#");
+  let cut = url.length;
+  if (q >= 0) cut = Math.min(cut, q);
+  if (h >= 0) cut = Math.min(cut, h);
+  return url.slice(0, cut);
+}
+function isInApp(filename) {
+  if (!filename) return true;
+  if (NODE_INTERNAL_RE.test(filename)) return false;
+  if (filename.includes("/node_modules/")) return false;
+  return true;
+}
+
+// src/utils/debug-id.ts
+var REGISTRY_KEY = "_allstakDebugIds";
+var DEBUG_ID_RE = /\/\/# debugId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/;
+var cache = /* @__PURE__ */ new Map();
+function resolveDebugId(filename) {
+  if (!filename) return void 0;
+  if (cache.has(filename)) return cache.get(filename) ?? void 0;
+  const registry = globalThis[REGISTRY_KEY];
+  if (registry && typeof registry === "object") {
+    const hit = registry[filename];
+    if (typeof hit === "string" && hit.length > 0) {
+      cache.set(filename, hit);
+      return hit;
+    }
+  }
+  if (typeof process === "undefined" || !process.versions?.node) {
+    cache.set(filename, null);
+    return void 0;
+  }
+  let path = filename;
+  if (path.startsWith("file://")) path = path.slice("file://".length);
+  if (!path.startsWith("/")) {
+    cache.set(filename, null);
+    return void 0;
+  }
+  try {
+    const fs = __require("fs");
+    const stat = fs.statSync(path);
+    const tailSize = Math.min(stat.size, 4096);
+    const fd = fs.openSync(path, "r");
+    try {
+      const buf = Buffer.alloc(tailSize);
+      fs.readSync(fd, buf, 0, tailSize, Math.max(0, stat.size - tailSize));
+      const text = buf.toString("utf8");
+      const m = DEBUG_ID_RE.exec(text);
+      if (m && m[1]) {
+        cache.set(filename, m[1]);
+        return m[1];
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+  }
+  cache.set(filename, null);
+  return void 0;
+}
+
 // src/modules/errors.ts
+function detectPlatform() {
+  if (typeof globalThis.HermesInternal !== "undefined") return "react-native";
+  if (typeof window !== "undefined") return "browser";
+  return "node";
+}
+function frameToString(f) {
+  const fn = f.function && f.function.length > 0 ? f.function : "<anonymous>";
+  const file = f.filename || f.absPath || "<anonymous>";
+  const line = typeof f.lineno === "number" ? f.lineno : 0;
+  const col = typeof f.colno === "number" ? f.colno : 0;
+  return `    at ${fn} (${file}:${line}:${col})`;
+}
 function browserRequestContext() {
   if (typeof window === "undefined" || typeof location === "undefined") return void 0;
   return {
@@ -148,38 +265,126 @@ var ErrorModule = class {
   clearBreadcrumbs() {
     this.breadcrumbs = [];
   }
+  /**
+   * Build the release-metadata block we attach to every event. Backend stores
+   * `release` + `environment` as first-class fields; the rest (sdk.name,
+   * sdk.version, platform, dist, commitSha, branch) ride along inside
+   * `metadata` so they survive the wire even before the backend has dedicated
+   * columns. Once those columns land, the ingester reads them out of metadata.
+   */
+  releaseTags() {
+    const out = {};
+    if (this.config.sdkName) out["sdk.name"] = this.config.sdkName;
+    if (this.config.sdkVersion) out["sdk.version"] = this.config.sdkVersion;
+    if (this.config.platform) out["platform"] = this.config.platform;
+    if (this.config.dist) out["dist"] = this.config.dist;
+    if (this.config.commitSha) out["commit.sha"] = this.config.commitSha;
+    if (this.config.branch) out["commit.branch"] = this.config.branch;
+    return out;
+  }
   captureException(error, context) {
-    const stackLines = error.stack?.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("at ")) ?? [];
+    const parsed = parseStack(error.stack);
+    const platform = this.config.platform || detectPlatform();
+    const frames = parsed.map((f) => ({
+      filename: f.filename,
+      absPath: f.absPath,
+      function: f.function,
+      lineno: f.lineno,
+      colno: f.colno,
+      inApp: f.inApp,
+      platform,
+      // Try to attribute the frame to a specific bundle's debug-id so
+      // the symbolicator can pick the right map. Reads either the
+      // browser registry (`globalThis._allstakDebugIds`) or the bundle
+      // file directly (Node). Cached per filename — repeated frames
+      // pointing at the same bundle hit the cache.
+      debugId: resolveDebugId(f.filename)
+    }));
+    const debugIdSet = /* @__PURE__ */ new Set();
+    for (const f of frames) if (f.debugId) debugIdSet.add(f.debugId);
+    const debugMeta = debugIdSet.size > 0 ? { images: Array.from(debugIdSet).map((id) => ({ type: "sourcemap", debugId: id })) } : void 0;
+    const stackTrace = frames.length > 0 ? frames.map(frameToString) : void 0;
     const currentBreadcrumbs = this.breadcrumbs.length > 0 ? [...this.breadcrumbs] : void 0;
     this.breadcrumbs = [];
+    if (!this.passesSampleRate()) return;
+    const exceptionClass = (error.name && error.name !== "Error" ? error.name : void 0) || error.constructor?.name || "Error";
     const payload = {
-      exceptionClass: error.constructor?.name || error.name || "Error",
+      exceptionClass,
       message: error.message,
-      stackTrace: stackLines.length > 0 ? stackLines : void 0,
-      level: "error",
+      stackTrace,
+      frames: frames.length > 0 ? frames : void 0,
+      debugMeta,
+      platform,
+      sdkName: this.config.sdkName ?? SDK_NAME,
+      sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
+      dist: this.config.dist,
+      level: this.config.level ?? "error",
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: context ? { ...this.config.tags, ...context } : this.config.tags,
+      metadata: this.buildMetadata(context),
       breadcrumbs: currentBreadcrumbs,
-      requestContext: browserRequestContext()
+      requestContext: browserRequestContext(),
+      fingerprint: this.config.fingerprint
     };
-    this.transport.send(INGEST_PATH, payload);
+    this.sendThroughBeforeSend(payload);
   }
   captureMessage(message, level = "info") {
+    if (!this.passesSampleRate()) return;
+    const platform = this.config.platform || detectPlatform();
     const payload = {
       exceptionClass: "Message",
       message,
+      platform,
+      sdkName: this.config.sdkName ?? SDK_NAME,
+      sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
+      dist: this.config.dist,
       level,
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: this.config.tags,
-      requestContext: browserRequestContext()
+      metadata: this.buildMetadata(),
+      requestContext: browserRequestContext(),
+      fingerprint: this.config.fingerprint
     };
-    this.transport.send(INGEST_PATH, payload);
+    this.sendThroughBeforeSend(payload);
+  }
+  // ── Filtering / control ─────────────────────────────────────────────
+  passesSampleRate() {
+    const r = this.config.sampleRate;
+    if (typeof r !== "number" || r >= 1) return true;
+    if (r <= 0) return false;
+    return Math.random() < r;
+  }
+  buildMetadata(perCallContext) {
+    const out = {
+      ...this.releaseTags(),
+      ...this.config.tags,
+      ...this.config.extras ?? {},
+      ...perCallContext ?? {}
+    };
+    const contexts = this.config.contexts;
+    if (contexts) {
+      for (const [name, ctx] of Object.entries(contexts)) {
+        out[`context.${name}`] = ctx;
+      }
+    }
+    return out;
+  }
+  async sendThroughBeforeSend(payload) {
+    let final = payload;
+    const beforeSend = this.config.beforeSend;
+    if (typeof beforeSend === "function") {
+      try {
+        final = await beforeSend(payload);
+      } catch {
+        final = payload;
+      }
+    }
+    if (!final) return;
+    this.transport.send(INGEST_PATH, final);
   }
   setupAutocapture() {
     if (typeof window === "undefined") return;
@@ -1029,6 +1234,36 @@ function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
+var SDK_VERSION = "1.2.0";
+var SDK_NAME = "allstak-js";
+function envVar(name) {
+  try {
+    if (typeof process !== "undefined" && process.env) {
+      const v = process.env[name];
+      if (v && v.length > 0) return v;
+    }
+  } catch {
+  }
+  return void 0;
+}
+function applyReleaseAutodetect(config) {
+  const isBrowser = typeof window !== "undefined";
+  if (!config.platform) config.platform = isBrowser ? "browser" : "node";
+  if (!config.sdkName) config.sdkName = SDK_NAME;
+  if (!config.sdkVersion) config.sdkVersion = SDK_VERSION;
+  if (!config.release) {
+    config.release = envVar("ALLSTAK_RELEASE") ?? envVar("npm_package_version") ?? envVar("VERCEL_GIT_COMMIT_SHA")?.slice(0, 12) ?? envVar("RAILWAY_GIT_COMMIT_SHA")?.slice(0, 12) ?? envVar("RENDER_GIT_COMMIT")?.slice(0, 12);
+  }
+  if (!config.commitSha) {
+    config.commitSha = envVar("ALLSTAK_COMMIT_SHA") ?? envVar("GIT_COMMIT") ?? envVar("VERCEL_GIT_COMMIT_SHA") ?? envVar("RAILWAY_GIT_COMMIT_SHA") ?? envVar("RENDER_GIT_COMMIT");
+  }
+  if (!config.branch) {
+    config.branch = envVar("ALLSTAK_BRANCH") ?? envVar("GIT_BRANCH") ?? envVar("VERCEL_GIT_COMMIT_REF") ?? envVar("RAILWAY_GIT_BRANCH");
+  }
+  if (!config.environment) {
+    config.environment = envVar("ALLSTAK_ENVIRONMENT") ?? envVar("NODE_ENV") ?? "production";
+  }
+}
 function resolveTransport(config) {
   if (config.apiKey) {
     return {
@@ -1050,6 +1285,7 @@ var AllStakClient = class {
     // ─── Node uncaughtException / unhandledRejection auto-capture ─────
     this.nodeUncaughtHandler = null;
     this.nodeRejectionHandler = null;
+    applyReleaseAutodetect(config);
     this.config = config;
     this.sessionId = generateId();
     const { baseUrl, apiKey } = resolveTransport(config);
@@ -1122,7 +1358,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
   }
   captureException(error, context) {
     const traceContext = {};
@@ -1215,6 +1451,66 @@ var AllStakClient = class {
   setTag(key, value) {
     if (!this.config.tags) this.config.tags = {};
     this.config.tags[key] = value;
+  }
+  /** Bulk-set tags. Merges with existing tags. */
+  setTags(tags) {
+    if (!this.config.tags) this.config.tags = {};
+    Object.assign(this.config.tags, tags);
+  }
+  /** Set a single extra value. */
+  setExtra(key, value) {
+    if (!this.config.extras) this.config.extras = {};
+    this.config.extras[key] = value;
+  }
+  /** Bulk-set extras. Merges with existing extras. */
+  setExtras(extras) {
+    if (!this.config.extras) this.config.extras = {};
+    Object.assign(this.config.extras, extras);
+  }
+  /**
+   * Attach a named context bag (e.g. `app`, `device`, `runtime`) that appears
+   * under `metadata['context.<name>']` on every subsequent event. Pass
+   * `null` to remove a previously-set context.
+   */
+  setContext(name, ctx) {
+    if (!this.config.contexts) this.config.contexts = {};
+    if (ctx === null) delete this.config.contexts[name];
+    else this.config.contexts[name] = ctx;
+  }
+  /** Set the default severity level applied to subsequent captures. */
+  setLevel(level) {
+    this.config.level = level;
+  }
+  /**
+   * Set a custom grouping fingerprint applied to subsequent events.
+   * Pass `null` or an empty array to clear and revert to default grouping.
+   */
+  setFingerprint(fingerprint) {
+    this.config.fingerprint = fingerprint && fingerprint.length > 0 ? fingerprint : void 0;
+  }
+  /**
+   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   */
+  async flush(timeoutMs = 2e3) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.transport.getBufferSize() > 0) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return true;
+  }
+  /**
+   * Phase 3 — runtime override of the SDK identity fields. Used by
+   * platform-specific integrations (e.g. installReactNative) so the
+   * resulting wire payload says `sdkName=allstak-react-native` and
+   * carries an auto-detected `dist` such as `ios-hermes`.
+   */
+  setIdentity(identity) {
+    if (identity.sdkName) this.config.sdkName = identity.sdkName;
+    if (identity.sdkVersion) this.config.sdkVersion = identity.sdkVersion;
+    if (identity.platform) this.config.platform = identity.platform;
+    if (identity.dist) this.config.dist = identity.dist;
   }
   getSessionId() {
     return this.sessionId;
@@ -1309,6 +1605,10 @@ var AllStak = {
   clearBreadcrumbs() {
     ensureInit().clearBreadcrumbs();
   },
+  /** Phase 3 — runtime SDK-identity override (used by RN install). */
+  setIdentity(identity) {
+    ensureInit().setIdentity(identity);
+  },
   /**
    * Capture a freeform message. By default routes to the **logs** stream
    * (so it shows up under "Logs" in the dashboard). For `error` / `fatal`
@@ -1353,6 +1653,31 @@ var AllStak = {
   },
   setTag(key, value) {
     ensureInit().setTag(key, value);
+  },
+  setTags(tags) {
+    ensureInit().setTags(tags);
+  },
+  setExtra(key, value) {
+    ensureInit().setExtra(key, value);
+  },
+  setExtras(extras) {
+    ensureInit().setExtras(extras);
+  },
+  setContext(name, ctx) {
+    ensureInit().setContext(name, ctx);
+  },
+  setLevel(level) {
+    ensureInit().setLevel(level);
+  },
+  setFingerprint(fingerprint) {
+    ensureInit().setFingerprint(fingerprint);
+  },
+  /**
+   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   */
+  flush(timeoutMs) {
+    return ensureInit().flush(timeoutMs);
   },
   getSessionId() {
     return ensureInit().getSessionId();
@@ -1404,4 +1729,4 @@ export {
   DatabaseModule,
   AllStak
 };
-//# sourceMappingURL=chunk-VVU7GM3N.mjs.map
+//# sourceMappingURL=chunk-KAMQ6UXK.mjs.map

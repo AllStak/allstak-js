@@ -106,6 +106,38 @@ export const AllStak = {
     ensureInit().setTag(key, value);
   },
 
+  setTags(tags: Record<string, string>): void {
+    ensureInit().setTags(tags);
+  },
+
+  setExtra(key: string, value: unknown): void {
+    ensureInit().setExtra(key, value);
+  },
+
+  setExtras(extras: Record<string, unknown>): void {
+    ensureInit().setExtras(extras);
+  },
+
+  setContext(name: string, ctx: Record<string, unknown> | null): void {
+    ensureInit().setContext(name, ctx);
+  },
+
+  setLevel(level: 'fatal' | 'error' | 'warning' | 'info' | 'debug'): void {
+    ensureInit().setLevel(level);
+  },
+
+  setFingerprint(fingerprint: string[] | null): void {
+    ensureInit().setFingerprint(fingerprint);
+  },
+
+  /**
+   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   */
+  flush(timeoutMs?: number): Promise<boolean> {
+    return ensureInit().flush(timeoutMs);
+  },
+
   getSessionId(): string {
     return ensureInit().getSessionId();
   },

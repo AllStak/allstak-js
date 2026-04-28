@@ -2,7 +2,7 @@ import { createRequire as __allstakCreateRequire } from 'node:module';
 const require = __allstakCreateRequire(import.meta.url);
 import {
   AllStak
-} from "./chunk-VVU7GM3N.mjs";
+} from "./chunk-46DEPP5D.mjs";
 import "./chunk-NY4SCN2B.mjs";
 
 // src/integrations/cron.ts

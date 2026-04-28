@@ -97,7 +97,34 @@ interface LogEvent {
     meta?: Record<string, unknown>;
 }
 
-interface AllStakConfig {
+/**
+ * Release-tracking metadata. All fields are optional — the SDK auto-detects
+ * sensible defaults from the runtime environment when possible:
+ *
+ * - `release`     ← `process.env.ALLSTAK_RELEASE`, then `npm_package_version`
+ * - `commitSha`   ← `process.env.ALLSTAK_COMMIT_SHA`, `GIT_COMMIT`, `VERCEL_GIT_COMMIT_SHA`,
+ *                   `RAILWAY_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`
+ * - `branch`      ← `process.env.ALLSTAK_BRANCH`, `GIT_BRANCH`, `VERCEL_GIT_COMMIT_REF`
+ * - `dist`        ← (none — must be set explicitly when bundling multiple builds per release)
+ * - `platform`    ← `'browser'` if `window` is defined, else `'node'`
+ *
+ * Explicit values in {@link AllStakConfig} always override auto-detection.
+ */
+interface ReleaseMetadata {
+    /** Build distribution tag (e.g. `'ios'`, `'android'`, `'web'`). */
+    dist?: string;
+    /** Git commit SHA the running build was built from. */
+    commitSha?: string;
+    /** Git branch the running build was built from. */
+    branch?: string;
+    /** Runtime platform — auto-detected as `'browser'` or `'node'`. */
+    platform?: string;
+    /** SDK package name — defaults to `allstak-js`. */
+    sdkName?: string;
+    /** SDK semver — defaults to {@link SDK_VERSION}. */
+    sdkVersion?: string;
+}
+interface AllStakConfig extends ReleaseMetadata {
     /**
      * Project API key from the AllStak dashboard (`ask_live_…`).
      * Required.
@@ -116,6 +143,25 @@ interface AllStakConfig {
         email?: string;
     };
     tags?: Record<string, string>;
+    /** Per-event extra data attached to every capture (override per call via context arg). */
+    extras?: Record<string, unknown>;
+    /** Named context bags (e.g. `app`, `device`). Each lives under `metadata['context.<name>']`. */
+    contexts?: Record<string, Record<string, unknown>>;
+    /** Default severity level for events that don't specify their own. */
+    level?: 'fatal' | 'error' | 'warning' | 'info' | 'debug';
+    /** Custom grouping fingerprint applied to every event. */
+    fingerprint?: string[];
+    /**
+     * Probability in [0, 1] that any given error is sent. Default: 1 (no sampling).
+     * Applied per event before {@link beforeSend}.
+     */
+    sampleRate?: number;
+    /**
+     * Mutate or drop an event before it is sent. Return `null` (or a falsy
+     * value) to drop. Sync or async. Errors thrown inside the hook are caught —
+     * the original event is sent so a buggy hook can't black-hole telemetry.
+     */
+    beforeSend?: (event: any) => any | null | undefined | Promise<any | null | undefined>;
     /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
     autoBreadcrumbs?: boolean;
     /** Enable automatic database instrumentation for pg and mysql2. Default: true */
@@ -196,6 +242,42 @@ declare class AllStakClient {
         email?: string;
     }): void;
     setTag(key: string, value: string): void;
+    /** Bulk-set tags. Merges with existing tags. */
+    setTags(tags: Record<string, string>): void;
+    /** Set a single extra value. */
+    setExtra(key: string, value: unknown): void;
+    /** Bulk-set extras. Merges with existing extras. */
+    setExtras(extras: Record<string, unknown>): void;
+    /**
+     * Attach a named context bag (e.g. `app`, `device`, `runtime`) that appears
+     * under `metadata['context.<name>']` on every subsequent event. Pass
+     * `null` to remove a previously-set context.
+     */
+    setContext(name: string, ctx: Record<string, unknown> | null): void;
+    /** Set the default severity level applied to subsequent captures. */
+    setLevel(level: 'fatal' | 'error' | 'warning' | 'info' | 'debug'): void;
+    /**
+     * Set a custom grouping fingerprint applied to subsequent events.
+     * Pass `null` or an empty array to clear and revert to default grouping.
+     */
+    setFingerprint(fingerprint: string[] | null): void;
+    /**
+     * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+     * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+     */
+    flush(timeoutMs?: number): Promise<boolean>;
+    /**
+     * Phase 3 — runtime override of the SDK identity fields. Used by
+     * platform-specific integrations (e.g. installReactNative) so the
+     * resulting wire payload says `sdkName=allstak-react-native` and
+     * carries an auto-detected `dist` such as `ios-hermes`.
+     */
+    setIdentity(identity: {
+        sdkName?: string;
+        sdkVersion?: string;
+        platform?: string;
+        dist?: string;
+    }): void;
     getSessionId(): string;
     /**
      * Start a new span. Automatically parented to the current active span.
@@ -268,6 +350,13 @@ declare const AllStak: {
     captureException(error: Error, context?: Record<string, unknown>): void;
     addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void;
     clearBreadcrumbs(): void;
+    /** Phase 3 — runtime SDK-identity override (used by RN install). */
+    setIdentity(identity: {
+        sdkName?: string;
+        sdkVersion?: string;
+        platform?: string;
+        dist?: string;
+    }): void;
     /**
      * Capture a freeform message. By default routes to the **logs** stream
      * (so it shows up under "Logs" in the dashboard). For `error` / `fatal`
@@ -308,6 +397,17 @@ declare const AllStak: {
         email?: string;
     }): void;
     setTag(key: string, value: string): void;
+    setTags(tags: Record<string, string>): void;
+    setExtra(key: string, value: unknown): void;
+    setExtras(extras: Record<string, unknown>): void;
+    setContext(name: string, ctx: Record<string, unknown> | null): void;
+    setLevel(level: "fatal" | "error" | "warning" | "info" | "debug"): void;
+    setFingerprint(fingerprint: string[] | null): void;
+    /**
+     * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+     * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+     */
+    flush(timeoutMs?: number): Promise<boolean>;
     getSessionId(): string;
     /**
      * Start a new span. Automatically parented to the current active span.
