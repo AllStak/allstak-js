@@ -1,12 +1,10 @@
-import { createRequire as __allstakCreateRequire } from 'node:module';
-const require = __allstakCreateRequire(import.meta.url);
 import {
   __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-NY4SCN2B.mjs";
+} from "./chunk-46REABUF.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -1216,8 +1214,9 @@ function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl) {
       void callback;
       return req;
     };
-    const originalGet = mod.get?.bind(mod);
-    if (originalGet) {
+    let originalGet;
+    if (typeof mod.get === "function") {
+      originalGet = mod.get.bind(mod);
       mod.get = function patchedGet(...args) {
         const req = mod.request(...args);
         req.end();
@@ -1232,6 +1231,72 @@ function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl) {
     });
   }
   return () => restorers.forEach((r) => r());
+}
+
+// src/scope.ts
+var Scope = class {
+  constructor() {
+    this.tags = {};
+    this.extras = {};
+    this.contexts = {};
+  }
+  setUser(user) {
+    this.user = user;
+    return this;
+  }
+  setTag(key, value) {
+    this.tags[key] = value;
+    return this;
+  }
+  setTags(tags) {
+    Object.assign(this.tags, tags);
+    return this;
+  }
+  setExtra(key, value) {
+    this.extras[key] = value;
+    return this;
+  }
+  setExtras(extras) {
+    Object.assign(this.extras, extras);
+    return this;
+  }
+  setContext(name, ctx) {
+    if (ctx === null) delete this.contexts[name];
+    else this.contexts[name] = ctx;
+    return this;
+  }
+  setLevel(level) {
+    this.level = level;
+    return this;
+  }
+  setFingerprint(fingerprint) {
+    this.fingerprint = fingerprint && fingerprint.length > 0 ? fingerprint : void 0;
+    return this;
+  }
+  clear() {
+    this.user = void 0;
+    this.tags = {};
+    this.extras = {};
+    this.contexts = {};
+    this.fingerprint = void 0;
+    this.level = void 0;
+    return this;
+  }
+};
+function mergeScopes(base, stack) {
+  const out = { ...base };
+  out.tags = { ...base.tags ?? {} };
+  out.extras = { ...base.extras ?? {} };
+  out.contexts = { ...base.contexts ?? {} };
+  for (const scope of stack) {
+    if (scope.user) out.user = scope.user;
+    Object.assign(out.tags, scope.tags);
+    Object.assign(out.extras, scope.extras);
+    Object.assign(out.contexts, scope.contexts);
+    if (scope.fingerprint) out.fingerprint = scope.fingerprint;
+    if (scope.level) out.level = scope.level;
+  }
+  return out;
 }
 
 // src/client.ts
@@ -1284,6 +1349,7 @@ function resolveTransport(config) {
 var AllStakClient = class {
   constructor(config) {
     this.sessionReplay = null;
+    this.scopeStack = [];
     // ─── Node uncaughtException / unhandledRejection auto-capture ─────
     this.nodeUncaughtHandler = null;
     this.nodeRejectionHandler = null;
@@ -1360,7 +1426,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
   }
   captureException(error, context) {
     const traceContext = {};
@@ -1368,7 +1434,82 @@ var AllStakClient = class {
     if (traceId) traceContext.traceId = traceId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
-    this.errors.captureException(error, { ...traceContext, ...context });
+    this.withScopedConfig(
+      () => this.errors.captureException(error, { ...traceContext, ...context })
+    );
+  }
+  /**
+   * Temporarily applies the scope-merged effective context onto the shared
+   * config object that {@link ErrorModule} reads from, runs the work, then
+   * restores. Lets `withScope` overrides land on the wire payload without
+   * threading a separate config arg through every capture call site.
+   */
+  withScopedConfig(work) {
+    if (this.scopeStack.length === 0) return work();
+    const eff = mergeScopes(this.config, this.scopeStack);
+    const snap = {
+      user: this.config.user,
+      tags: this.config.tags,
+      extras: this.config.extras,
+      contexts: this.config.contexts,
+      fingerprint: this.config.fingerprint,
+      level: this.config.level
+    };
+    this.config.user = eff.user;
+    this.config.tags = eff.tags;
+    this.config.extras = eff.extras;
+    this.config.contexts = eff.contexts;
+    this.config.fingerprint = eff.fingerprint;
+    this.config.level = eff.level;
+    try {
+      return work();
+    } finally {
+      this.config.user = snap.user;
+      this.config.tags = snap.tags;
+      this.config.extras = snap.extras;
+      this.config.contexts = snap.contexts;
+      this.config.fingerprint = snap.fingerprint;
+      this.config.level = snap.level;
+    }
+  }
+  /**
+   * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
+   * extra/context/fingerprint/level set on the scope is visible only on
+   * captures inside the callback. Pop is automatic (sync, async, throwing).
+   */
+  withScope(callback) {
+    const scope = new Scope();
+    this.scopeStack.push(scope);
+    let popped = false;
+    const pop = () => {
+      if (!popped) {
+        popped = true;
+        this.scopeStack.pop();
+      }
+    };
+    try {
+      const result = callback(scope);
+      if (result && typeof result.then === "function") {
+        return result.then(
+          (v) => {
+            pop();
+            return v;
+          },
+          (e) => {
+            pop();
+            throw e;
+          }
+        );
+      }
+      pop();
+      return result;
+    } catch (err) {
+      pop();
+      throw err;
+    }
+  }
+  getCurrentScope() {
+    return this.scopeStack[this.scopeStack.length - 1] ?? null;
   }
   addBreadcrumb(type, message, level, data) {
     this.errors.addBreadcrumb(type, message, level, data);
@@ -1392,7 +1533,7 @@ var AllStakClient = class {
       this.logs.send(logLevel, message);
     }
     if (as === "error" || as === "both") {
-      this.errors.captureMessage(message, level);
+      this.withScopedConfig(() => this.errors.captureMessage(message, level));
     }
   }
   /**
@@ -1681,6 +1822,14 @@ var AllStak = {
   flush(timeoutMs) {
     return ensureInit().flush(timeoutMs);
   },
+  /**
+   * Run `callback` with a fresh, temporary {@link Scope} that isolates any
+   * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for
+   * sync, async, and throwing callbacks.
+   */
+  withScope(callback) {
+    return ensureInit().withScope(callback);
+  },
   getSessionId() {
     return ensureInit().getSessionId();
   },
@@ -1729,6 +1878,7 @@ function ensureInit() {
 export {
   Span,
   DatabaseModule,
+  Scope,
   AllStak
 };
-//# sourceMappingURL=chunk-46DEPP5D.mjs.map
+//# sourceMappingURL=chunk-OVCO4NQY.mjs.map

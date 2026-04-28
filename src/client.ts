@@ -187,6 +187,9 @@ function resolveTransport(config: AllStakConfig): ParsedConfig {
   throw new Error('AllStak: config.apiKey is required');
 }
 
+import { Scope, mergeScopes } from './scope';
+export { Scope } from './scope';
+
 export class AllStakClient {
   private transport: HttpTransport;
   private config: AllStakConfig;
@@ -198,6 +201,7 @@ export class AllStakClient {
   private _database: DatabaseModule;
   private sessionReplay: SessionReplayModule | null = null;
   private sessionId: string;
+  private scopeStack: Scope[] = [];
 
   constructor(config: AllStakConfig) {
     applyReleaseAutodetect(config);
@@ -306,7 +310,73 @@ export class AllStakClient {
     if (traceId) traceContext.traceId = traceId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
-    this.errors.captureException(error, { ...traceContext, ...context });
+    this.withScopedConfig(() =>
+      this.errors.captureException(error, { ...traceContext, ...context }),
+    );
+  }
+
+  /**
+   * Temporarily applies the scope-merged effective context onto the shared
+   * config object that {@link ErrorModule} reads from, runs the work, then
+   * restores. Lets `withScope` overrides land on the wire payload without
+   * threading a separate config arg through every capture call site.
+   */
+  private withScopedConfig<T>(work: () => T): T {
+    if (this.scopeStack.length === 0) return work();
+    const eff = mergeScopes(this.config, this.scopeStack);
+    const snap = {
+      user: this.config.user,
+      tags: this.config.tags,
+      extras: (this.config as any).extras,
+      contexts: (this.config as any).contexts,
+      fingerprint: (this.config as any).fingerprint,
+      level: (this.config as any).level,
+    };
+    this.config.user = eff.user;
+    this.config.tags = eff.tags;
+    (this.config as any).extras = eff.extras;
+    (this.config as any).contexts = eff.contexts;
+    (this.config as any).fingerprint = eff.fingerprint;
+    (this.config as any).level = eff.level;
+    try { return work(); }
+    finally {
+      this.config.user = snap.user;
+      this.config.tags = snap.tags;
+      (this.config as any).extras = snap.extras;
+      (this.config as any).contexts = snap.contexts;
+      (this.config as any).fingerprint = snap.fingerprint;
+      (this.config as any).level = snap.level;
+    }
+  }
+
+  /**
+   * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
+   * extra/context/fingerprint/level set on the scope is visible only on
+   * captures inside the callback. Pop is automatic (sync, async, throwing).
+   */
+  withScope<T>(callback: (scope: Scope) => T): T {
+    const scope = new Scope();
+    this.scopeStack.push(scope);
+    let popped = false;
+    const pop = () => { if (!popped) { popped = true; this.scopeStack.pop(); } };
+    try {
+      const result = callback(scope);
+      if (result && typeof (result as any).then === 'function') {
+        return (result as any).then(
+          (v: any) => { pop(); return v; },
+          (e: any) => { pop(); throw e; },
+        );
+      }
+      pop();
+      return result;
+    } catch (err) {
+      pop();
+      throw err;
+    }
+  }
+
+  getCurrentScope(): Scope | null {
+    return this.scopeStack[this.scopeStack.length - 1] ?? null;
   }
 
   addBreadcrumb(
@@ -344,7 +414,7 @@ export class AllStakClient {
       this.logs.send(logLevel, message);
     }
     if (as === 'error' || as === 'both') {
-      this.errors.captureMessage(message, level);
+      this.withScopedConfig(() => this.errors.captureMessage(message, level));
     }
   }
 

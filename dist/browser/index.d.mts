@@ -86,6 +86,47 @@ declare class Span {
     get isFinished(): boolean;
 }
 
+/**
+ * Per-call scoped context isolation.
+ *
+ * A `Scope` carries the same shape as the top-level config (user, tags,
+ * extras, contexts, fingerprint, level) but only applies inside the
+ * `withScope` callback that owns it. The client merges the active scope
+ * stack on top of the base config when building each event payload, so:
+ *
+ *   - context set inside `withScope` does NOT leak out
+ *   - nested scopes layer additively (later wins on key conflicts)
+ *   - throwing or async work in the callback still pops the scope
+ *
+ * Use this on the server (SSR / RSC / API route handlers) to attach
+ * per-request user/tags without leaking that data into another request
+ * being processed concurrently.
+ */
+type Severity = 'fatal' | 'error' | 'warning' | 'info' | 'debug';
+declare class Scope {
+    user?: {
+        id?: string;
+        email?: string;
+    };
+    tags: Record<string, string>;
+    extras: Record<string, unknown>;
+    contexts: Record<string, Record<string, unknown>>;
+    fingerprint?: string[];
+    level?: Severity;
+    setUser(user: {
+        id?: string;
+        email?: string;
+    }): this;
+    setTag(key: string, value: string): this;
+    setTags(tags: Record<string, string>): this;
+    setExtra(key: string, value: unknown): this;
+    setExtras(extras: Record<string, unknown>): this;
+    setContext(name: string, ctx: Record<string, unknown> | null): this;
+    setLevel(level: Severity): this;
+    setFingerprint(fingerprint: string[] | null): this;
+    clear(): this;
+}
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 interface LogEvent {
     type: 'log';
@@ -193,9 +234,24 @@ declare class AllStakClient {
     private _database;
     private sessionReplay;
     private sessionId;
+    private scopeStack;
     constructor(config: AllStakConfig);
     private isNodeBuild;
     captureException(error: Error, context?: Record<string, unknown>): void;
+    /**
+     * Temporarily applies the scope-merged effective context onto the shared
+     * config object that {@link ErrorModule} reads from, runs the work, then
+     * restores. Lets `withScope` overrides land on the wire payload without
+     * threading a separate config arg through every capture call site.
+     */
+    private withScopedConfig;
+    /**
+     * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
+     * extra/context/fingerprint/level set on the scope is visible only on
+     * captures inside the callback. Pop is automatic (sync, async, throwing).
+     */
+    withScope<T>(callback: (scope: Scope) => T): T;
+    getCurrentScope(): Scope | null;
     addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void;
     clearBreadcrumbs(): void;
     /**
@@ -408,6 +464,12 @@ declare const AllStak: {
      * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
      */
     flush(timeoutMs?: number): Promise<boolean>;
+    /**
+     * Run `callback` with a fresh, temporary {@link Scope} that isolates any
+     * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for
+     * sync, async, and throwing callbacks.
+     */
+    withScope<T>(callback: (scope: Scope) => T): T;
     getSessionId(): string;
     /**
      * Start a new span. Automatically parented to the current active span.
@@ -430,4 +492,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Span, type SpanData };
+export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Scope, Span, type SpanData };

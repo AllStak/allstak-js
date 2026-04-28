@@ -1,4 +1,6 @@
 import { AllStakClient, AllStakConfig } from './client';
+import { Scope } from './scope';
+export { Scope } from './scope';
 import type { HttpRequestItem } from './modules/http-requests';
 import type { HeartbeatOptions } from './modules/cron';
 import type { Span } from './modules/tracing';
@@ -136,6 +138,15 @@ export const AllStak = {
    */
   flush(timeoutMs?: number): Promise<boolean> {
     return ensureInit().flush(timeoutMs);
+  },
+
+  /**
+   * Run `callback` with a fresh, temporary {@link Scope} that isolates any
+   * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for
+   * sync, async, and throwing callbacks.
+   */
+  withScope<T>(callback: (scope: Scope) => T): T {
+    return ensureInit().withScope(callback);
   },
 
   getSessionId(): string {
