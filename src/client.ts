@@ -68,6 +68,25 @@ export interface AllStakConfig extends ReleaseMetadata {
   release?: string;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
+  /** Per-event extra data attached to every capture (override per call via context arg). */
+  extras?: Record<string, unknown>;
+  /** Named context bags (e.g. `app`, `device`). Each lives under `metadata['context.<name>']`. */
+  contexts?: Record<string, Record<string, unknown>>;
+  /** Default severity level for events that don't specify their own. */
+  level?: 'fatal' | 'error' | 'warning' | 'info' | 'debug';
+  /** Custom grouping fingerprint applied to every event. */
+  fingerprint?: string[];
+  /**
+   * Probability in [0, 1] that any given error is sent. Default: 1 (no sampling).
+   * Applied per event before {@link beforeSend}.
+   */
+  sampleRate?: number;
+  /**
+   * Mutate or drop an event before it is sent. Return `null` (or a falsy
+   * value) to drop. Sync or async. Errors thrown inside the hook are caught —
+   * the original event is sent so a buggy hook can't black-hole telemetry.
+   */
+  beforeSend?: (event: any) => any | null | undefined | Promise<any | null | undefined>;
   /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
   autoBreadcrumbs?: boolean;
   /** Enable automatic database instrumentation for pg and mysql2. Default: true */
@@ -168,6 +187,9 @@ function resolveTransport(config: AllStakConfig): ParsedConfig {
   throw new Error('AllStak: config.apiKey is required');
 }
 
+import { Scope, mergeScopes } from './scope';
+export { Scope } from './scope';
+
 export class AllStakClient {
   private transport: HttpTransport;
   private config: AllStakConfig;
@@ -179,6 +201,7 @@ export class AllStakClient {
   private _database: DatabaseModule;
   private sessionReplay: SessionReplayModule | null = null;
   private sessionId: string;
+  private scopeStack: Scope[] = [];
 
   constructor(config: AllStakConfig) {
     applyReleaseAutodetect(config);
@@ -287,7 +310,73 @@ export class AllStakClient {
     if (traceId) traceContext.traceId = traceId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
-    this.errors.captureException(error, { ...traceContext, ...context });
+    this.withScopedConfig(() =>
+      this.errors.captureException(error, { ...traceContext, ...context }),
+    );
+  }
+
+  /**
+   * Temporarily applies the scope-merged effective context onto the shared
+   * config object that {@link ErrorModule} reads from, runs the work, then
+   * restores. Lets `withScope` overrides land on the wire payload without
+   * threading a separate config arg through every capture call site.
+   */
+  private withScopedConfig<T>(work: () => T): T {
+    if (this.scopeStack.length === 0) return work();
+    const eff = mergeScopes(this.config, this.scopeStack);
+    const snap = {
+      user: this.config.user,
+      tags: this.config.tags,
+      extras: (this.config as any).extras,
+      contexts: (this.config as any).contexts,
+      fingerprint: (this.config as any).fingerprint,
+      level: (this.config as any).level,
+    };
+    this.config.user = eff.user;
+    this.config.tags = eff.tags;
+    (this.config as any).extras = eff.extras;
+    (this.config as any).contexts = eff.contexts;
+    (this.config as any).fingerprint = eff.fingerprint;
+    (this.config as any).level = eff.level;
+    try { return work(); }
+    finally {
+      this.config.user = snap.user;
+      this.config.tags = snap.tags;
+      (this.config as any).extras = snap.extras;
+      (this.config as any).contexts = snap.contexts;
+      (this.config as any).fingerprint = snap.fingerprint;
+      (this.config as any).level = snap.level;
+    }
+  }
+
+  /**
+   * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
+   * extra/context/fingerprint/level set on the scope is visible only on
+   * captures inside the callback. Pop is automatic (sync, async, throwing).
+   */
+  withScope<T>(callback: (scope: Scope) => T): T {
+    const scope = new Scope();
+    this.scopeStack.push(scope);
+    let popped = false;
+    const pop = () => { if (!popped) { popped = true; this.scopeStack.pop(); } };
+    try {
+      const result = callback(scope);
+      if (result && typeof (result as any).then === 'function') {
+        return (result as any).then(
+          (v: any) => { pop(); return v; },
+          (e: any) => { pop(); throw e; },
+        );
+      }
+      pop();
+      return result;
+    } catch (err) {
+      pop();
+      throw err;
+    }
+  }
+
+  getCurrentScope(): Scope | null {
+    return this.scopeStack[this.scopeStack.length - 1] ?? null;
   }
 
   addBreadcrumb(
@@ -325,7 +414,7 @@ export class AllStakClient {
       this.logs.send(logLevel, message);
     }
     if (as === 'error' || as === 'both') {
-      this.errors.captureMessage(message, level);
+      this.withScopedConfig(() => this.errors.captureMessage(message, level));
     }
   }
 
@@ -399,6 +488,61 @@ export class AllStakClient {
   setTag(key: string, value: string): void {
     if (!this.config.tags) this.config.tags = {};
     this.config.tags[key] = value;
+  }
+
+  /** Bulk-set tags. Merges with existing tags. */
+  setTags(tags: Record<string, string>): void {
+    if (!this.config.tags) this.config.tags = {};
+    Object.assign(this.config.tags, tags);
+  }
+
+  /** Set a single extra value. */
+  setExtra(key: string, value: unknown): void {
+    if (!this.config.extras) this.config.extras = {};
+    this.config.extras[key] = value;
+  }
+
+  /** Bulk-set extras. Merges with existing extras. */
+  setExtras(extras: Record<string, unknown>): void {
+    if (!this.config.extras) this.config.extras = {};
+    Object.assign(this.config.extras, extras);
+  }
+
+  /**
+   * Attach a named context bag (e.g. `app`, `device`, `runtime`) that appears
+   * under `metadata['context.<name>']` on every subsequent event. Pass
+   * `null` to remove a previously-set context.
+   */
+  setContext(name: string, ctx: Record<string, unknown> | null): void {
+    if (!this.config.contexts) this.config.contexts = {};
+    if (ctx === null) delete this.config.contexts[name];
+    else this.config.contexts[name] = ctx;
+  }
+
+  /** Set the default severity level applied to subsequent captures. */
+  setLevel(level: 'fatal' | 'error' | 'warning' | 'info' | 'debug'): void {
+    this.config.level = level;
+  }
+
+  /**
+   * Set a custom grouping fingerprint applied to subsequent events.
+   * Pass `null` or an empty array to clear and revert to default grouping.
+   */
+  setFingerprint(fingerprint: string[] | null): void {
+    this.config.fingerprint = fingerprint && fingerprint.length > 0 ? fingerprint : undefined;
+  }
+
+  /**
+   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
+   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   */
+  async flush(timeoutMs = 2000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.transport.getBufferSize() > 0) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return true;
   }
 
   /**

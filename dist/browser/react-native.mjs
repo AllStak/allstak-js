@@ -1,6 +1,6 @@
 import {
   AllStak
-} from "./chunk-ZKMM4EAU.mjs";
+} from "./chunk-OVCO4NQY.mjs";
 import {
   __require
 } from "./chunk-46REABUF.mjs";
@@ -109,6 +109,25 @@ function installReactNative(options = {}) {
   const autoAppState = options.autoAppStateBreadcrumbs !== false;
   const autoNetwork = options.autoNetworkCapture !== false;
   AllStak.setTag("platform", "react-native");
+  try {
+    const hermes = typeof globalThis.HermesInternal !== "undefined";
+    let dist;
+    try {
+      const rn = __require("react-native");
+      const os = rn?.Platform?.OS;
+      if (os === "ios" || os === "android") {
+        dist = `${os}-${hermes ? "hermes" : "jsc"}`;
+      }
+    } catch {
+    }
+    AllStak.setIdentity({
+      sdkName: "allstak-react-native",
+      sdkVersion: "1.2.0",
+      platform: "react-native",
+      dist
+    });
+  } catch {
+  }
   if (autoNetwork) {
     try {
       instrumentXmlHttpRequest();

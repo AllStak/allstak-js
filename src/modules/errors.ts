@@ -77,6 +77,7 @@ interface ErrorIngestPayload {
   metadata?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
   requestContext?: ErrorRequestContext;
+  fingerprint?: string[];
 }
 
 /**
@@ -214,39 +215,46 @@ export class ErrorModule {
     const currentBreadcrumbs = this.breadcrumbs.length > 0 ? [...this.breadcrumbs] : undefined;
     this.breadcrumbs = [];
 
-    const payload: ErrorIngestPayload = {
-      exceptionClass: error.constructor?.name || error.name || 'Error',
+    if (!this.passesSampleRate()) return;
+
+    // Prefer an explicit `error.name` override (e.g. native crashes set
+    // it to 'NSException'); fall back to constructor name then 'Error'.
+    const exceptionClass =
+      (error.name && error.name !== 'Error' ? error.name : undefined) ||
+      error.constructor?.name ||
+      'Error';
+
+    const payload: any = {
+      exceptionClass,
       message: error.message,
       stackTrace,
       frames: frames.length > 0 ? frames : undefined,
       debugMeta,
-      // SDK identity — promoted to first-class wire fields so the
-      // backend's existing platform/sdk_name/sdk_version columns are
-      // populated for every event without depending on User-Agent
-      // sniffing or the metadata bag.
       platform,
       sdkName: this.config.sdkName ?? SDK_NAME,
       sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
       dist: this.config.dist,
-      level: 'error',
+      level: this.config.level ?? 'error',
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: { ...this.releaseTags(), ...this.config.tags, ...(context ?? {}) },
+      metadata: this.buildMetadata(context),
       breadcrumbs: currentBreadcrumbs,
       requestContext: browserRequestContext(),
+      fingerprint: this.config.fingerprint,
     };
 
-    this.transport.send(INGEST_PATH, payload);
+    this.sendThroughBeforeSend(payload);
   }
 
   captureMessage(
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
   ): void {
+    if (!this.passesSampleRate()) return;
     const platform = this.config.platform || detectPlatform();
-    const payload: ErrorIngestPayload = {
+    const payload: any = {
       exceptionClass: 'Message',
       message,
       platform,
@@ -258,11 +266,48 @@ export class ErrorModule {
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: { ...this.releaseTags(), ...this.config.tags },
+      metadata: this.buildMetadata(),
       requestContext: browserRequestContext(),
+      fingerprint: this.config.fingerprint,
     };
 
-    this.transport.send(INGEST_PATH, payload);
+    this.sendThroughBeforeSend(payload);
+  }
+
+  // ── Filtering / control ─────────────────────────────────────────────
+
+  private passesSampleRate(): boolean {
+    const r = (this.config as any).sampleRate;
+    if (typeof r !== 'number' || r >= 1) return true;
+    if (r <= 0) return false;
+    return Math.random() < r;
+  }
+
+  private buildMetadata(perCallContext?: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      ...this.releaseTags(),
+      ...this.config.tags,
+      ...((this.config as any).extras ?? {}),
+      ...(perCallContext ?? {}),
+    };
+    const contexts = (this.config as any).contexts as Record<string, Record<string, unknown>> | undefined;
+    if (contexts) {
+      for (const [name, ctx] of Object.entries(contexts)) {
+        out[`context.${name}`] = ctx;
+      }
+    }
+    return out;
+  }
+
+  private async sendThroughBeforeSend(payload: any): Promise<void> {
+    let final: any = payload;
+    const beforeSend = (this.config as any).beforeSend;
+    if (typeof beforeSend === 'function') {
+      try { final = await beforeSend(payload); }
+      catch { final = payload; /* never let a buggy hook drop telemetry */ }
+    }
+    if (!final) return;
+    this.transport.send(INGEST_PATH, final);
   }
 
   private setupAutocapture(): void {
