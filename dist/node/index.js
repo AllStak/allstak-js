@@ -34,10 +34,13 @@ var EventBuffer = class {
     this.queue = [];
   }
   push(event) {
+    let dropped = false;
     if (this.queue.length >= MAX_BUFFER_SIZE) {
       this.queue.shift();
+      dropped = true;
     }
     this.queue.push(event);
+    return dropped;
   }
   drain() {
     const items = [...this.queue];
@@ -52,44 +55,51 @@ var EventBuffer = class {
   }
 };
 
-// src/utils/retry.ts
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function withRetry(fn, maxRetries = 3, baseDelay = 500) {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt === maxRetries) throw err;
-      const delay = baseDelay * Math.pow(2, attempt);
-      await sleep(delay);
-    }
-  }
-  throw new Error("Max retries reached");
-}
-
 // src/transport/http.ts
-var REQUEST_TIMEOUT = 3e3;
+var REQUEST_TIMEOUT = 2e3;
+var FAILURE_THRESHOLD = 3;
+var BACKOFF_BASE_MS = 500;
+var BACKOFF_MAX_MS = 3e4;
 var HttpTransport = class {
   constructor(baseUrl, apiKey) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.buffer = new EventBuffer();
     this.flushing = false;
+    this.consecutiveFailures = 0;
+    this.circuitOpenUntil = 0;
+    this.sent = 0;
+    this.failed = 0;
+    this.dropped = 0;
   }
-  async send(path, payload) {
-    const url = `${this.baseUrl}${path}`;
+  send(path, payload) {
+    this.enqueueOrDispatch({ path, payload });
+    return Promise.resolve();
+  }
+  enqueueOrDispatch(item) {
+    if (Date.now() < this.circuitOpenUntil) {
+      if (this.buffer.push(item)) this.dropped++;
+      return;
+    }
+    void this.dispatch(item).catch(() => void 0);
+  }
+  async dispatch(item) {
     try {
-      await this.doFetch(url, payload);
-      await this.flushBuffer(path);
-    } catch {
-      this.buffer.push({ path, payload });
+      await this.doFetch(`${this.baseUrl}${item.path}`, item.payload);
+      this.sent++;
+      this.consecutiveFailures = 0;
+      this.circuitOpenUntil = 0;
+      this.scheduleFlush();
+    } catch (err) {
+      this.failed++;
+      this.recordFailure(err);
+      if (this.buffer.push(item)) this.dropped++;
     }
   }
   async doFetch(url, payload) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+    const started = Date.now();
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -102,29 +112,86 @@ var HttpTransport = class {
       });
       clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res;
     } catch (err) {
       clearTimeout(timeoutId);
       throw err;
+    } finally {
+      this.lastTransportLatencyMs = Date.now() - started;
     }
   }
-  async flushBuffer(currentPath) {
+  scheduleFlush() {
+    if (this.buffer.size === 0 || this.flushing) return;
+    const delay = Math.max(0, this.circuitOpenUntil - Date.now());
+    const timer = setTimeout(() => {
+      void this.flushBuffer().catch(() => void 0);
+    }, delay);
+    if (typeof timer === "object" && typeof timer.unref === "function") timer.unref();
+  }
+  async flushBuffer() {
     if (this.flushing || this.buffer.size === 0) return;
     this.flushing = true;
+    const started = Date.now();
     try {
       const items = this.buffer.drain();
       for (const item of items) {
-        const url = `${this.baseUrl}${item.path || currentPath}`;
-        await withRetry(() => this.doFetch(url, item.payload));
+        if (Date.now() < this.circuitOpenUntil) {
+          if (this.buffer.push(item)) this.dropped++;
+          continue;
+        }
+        try {
+          await this.doFetch(`${this.baseUrl}${item.path}`, item.payload);
+          this.sent++;
+          this.consecutiveFailures = 0;
+          this.circuitOpenUntil = 0;
+        } catch (err) {
+          this.failed++;
+          this.recordFailure(err);
+          if (this.buffer.push(item)) this.dropped++;
+        }
       }
     } catch {
     } finally {
+      this.lastFlushDurationMs = Date.now() - started;
       this.flushing = false;
+      if (this.buffer.size > 0) this.scheduleFlush();
     }
+  }
+  recordFailure(error) {
+    this.consecutiveFailures++;
+    if (this.consecutiveFailures < FAILURE_THRESHOLD) return;
+    const retryAfterMs = retryAfterFromError(error);
+    const backoff = retryAfterMs ?? jitteredBackoff(this.consecutiveFailures);
+    this.circuitOpenUntil = Date.now() + backoff;
   }
   getBufferSize() {
     return this.buffer.size;
   }
+  noteDropped(count = 1) {
+    this.dropped += Math.max(0, count);
+  }
+  getStats() {
+    return {
+      queued: this.buffer.size,
+      sent: this.sent,
+      failed: this.failed,
+      dropped: this.dropped,
+      consecutiveFailures: this.consecutiveFailures,
+      circuitOpenUntil: this.circuitOpenUntil,
+      lastTransportLatencyMs: this.lastTransportLatencyMs,
+      lastFlushDurationMs: this.lastFlushDurationMs
+    };
+  }
 };
+function jitteredBackoff(failures) {
+  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(8, failures - FAILURE_THRESHOLD));
+  return Math.floor(exp / 2 + Math.random() * (exp / 2));
+}
+function retryAfterFromError(error) {
+  const message = error instanceof Error ? error.message : "";
+  const match = /HTTP\s+(429|503)/.exec(message);
+  return match ? BACKOFF_MAX_MS : null;
+}
 
 // src/utils/stack.ts
 var V8_FRAME_RE = /^\s*at\s+(?:(.+?)\s+\()?((?:.+?):(\d+):(\d+))\)?\s*$/;
@@ -343,6 +410,12 @@ var ErrorModule = class {
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
+      traceId: stringContext(context, "traceId"),
+      spanId: stringContext(context, "spanId"),
+      parentSpanId: stringContext(context, "parentSpanId"),
+      requestId: stringContext(context, "requestId"),
+      replayId: stringContext(context, "replayId"),
+      service: stringContext(context, "service"),
       user: this.config.user,
       metadata: this.buildMetadata(context),
       breadcrumbs: currentBreadcrumbs,
@@ -437,6 +510,11 @@ var ErrorModule = class {
     }
   }
 };
+function stringContext(context, key) {
+  const value = context?.[key];
+  if (typeof value !== "string") return void 0;
+  return value.trim().length > 0 ? value : void 0;
+}
 
 // src/modules/logs.ts
 var INGEST_PATH2 = "/ingest/v1/logs";
@@ -782,6 +860,7 @@ var HttpRequestModule = class {
     }
     this.queue.push({
       traceId: item.traceId ?? generateTraceId(),
+      requestId: item.requestId ?? generateTraceId(),
       direction: item.direction,
       method: item.method,
       host: item.host,
@@ -790,6 +869,14 @@ var HttpRequestModule = class {
       durationMs: item.durationMs,
       requestSize: item.requestSize,
       responseSize: item.responseSize,
+      requestBody: item.requestBody,
+      responseBody: item.responseBody,
+      requestHeaders: item.requestHeaders,
+      responseHeaders: item.responseHeaders,
+      requestBodyCaptureStatus: item.requestBodyCaptureStatus,
+      responseBodyCaptureStatus: item.responseBodyCaptureStatus,
+      requestBodyCaptureReason: item.requestBodyCaptureReason,
+      responseBodyCaptureReason: item.responseBodyCaptureReason,
       userId: item.userId,
       errorFingerprint: item.errorFingerprint,
       environment: this.defaults.environment,
@@ -1500,7 +1587,7 @@ function enableDbAutoInstrumentation(dbModule, config) {
 }
 
 // src/modules/auto-breadcrumbs.ts
-function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl) {
+function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext, bodyCapture) {
   if (typeof globalThis.fetch !== "function") return;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async function(input, init) {
@@ -1508,6 +1595,10 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl) {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const safePath = url.split("?")[0];
     const isOwnIngest = ownBaseUrl && url.startsWith(ownBaseUrl);
+    const correlation = !isOwnIngest ? traceContext?.() : void 0;
+    const requestId = correlation?.requestId ?? generateRequestId();
+    const traceId = correlation?.traceId;
+    const propagatedInit = !isOwnIngest && traceId ? withTraceHeaders(init, traceId, requestId) : init;
     let host = "";
     let path = safePath;
     try {
@@ -1518,7 +1609,7 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl) {
     }
     const start = Date.now();
     try {
-      const response = await originalFetch.call(this, input, init);
+      const response = await originalFetch.call(this, input, propagatedInit);
       const durationMs = Date.now() - start;
       addBreadcrumb(
         "http",
@@ -1528,13 +1619,17 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl) {
       );
       if (captureRequest && !isOwnIngest) {
         try {
+          const captured = await captureBodies(input, propagatedInit, response, bodyCapture);
           captureRequest({
             direction: "outbound",
             method,
             host,
             path,
             statusCode: response.status,
-            durationMs
+            durationMs,
+            traceId,
+            requestId,
+            ...captured
           });
         } catch {
         }
@@ -1556,7 +1651,9 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl) {
             host,
             path,
             statusCode: 0,
-            durationMs
+            durationMs,
+            traceId,
+            requestId
           });
         } catch {
         }
@@ -1564,6 +1661,117 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl) {
       throw err;
     }
   };
+}
+async function captureBodies(input, init, response, options) {
+  if (!options?.enabled) {
+    return {
+      requestBodyCaptureStatus: "disabled",
+      responseBodyCaptureStatus: "disabled",
+      requestBodyCaptureReason: "HTTP body capture is disabled by SDK configuration.",
+      responseBodyCaptureReason: "HTTP body capture is disabled by SDK configuration."
+    };
+  }
+  const requestHeaders = headersToObject(init?.headers);
+  const responseHeaders = headersToObject(response.headers);
+  const contentTypes = options.contentTypes ?? ["application/json", "text/plain"];
+  const maxBodySize = Math.max(0, options.maxBodySize ?? 8192);
+  const requestCapture = typeof init?.body === "string" ? sanitizeBody(init.body, requestHeaders["content-type"], contentTypes, maxBodySize, options.redactFields) : { status: "unsupported", reason: "Request body was not a string init.body and cannot be safely cloned." };
+  let responseCapture = { status: "unsupported", reason: "Response content type is not allowlisted for body capture." };
+  const responseContentType = responseHeaders["content-type"];
+  if (isAllowedContentType(responseContentType, contentTypes)) {
+    try {
+      responseCapture = sanitizeBody(await response.clone().text(), responseContentType, contentTypes, maxBodySize, options.redactFields);
+    } catch {
+      responseCapture = { status: "unsupported", reason: "Response body could not be cloned safely." };
+    }
+  }
+  void input;
+  return {
+    requestBody: requestCapture.body,
+    responseBody: responseCapture.body,
+    requestHeaders: sanitizeHeaders(requestHeaders),
+    responseHeaders: sanitizeHeaders(responseHeaders),
+    requestBodyCaptureStatus: requestCapture.status,
+    responseBodyCaptureStatus: responseCapture.status,
+    requestBodyCaptureReason: requestCapture.reason,
+    responseBodyCaptureReason: responseCapture.reason
+  };
+}
+function headersToObject(headers) {
+  if (!headers) return {};
+  const out = {};
+  new Headers(headers).forEach((value, key) => {
+    out[key.toLowerCase()] = value;
+  });
+  return out;
+}
+function sanitizeHeaders(headers) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const normalized = key.toLowerCase();
+    out[normalized] = /authorization|cookie|token|secret|password|otp|session/i.test(normalized) ? "[REDACTED]" : value;
+  }
+  return out;
+}
+function sanitizeBody(body, contentType, allowedContentTypes, maxBodySize, customFields) {
+  if (!isAllowedContentType(contentType, allowedContentTypes)) {
+    return { status: "unsupported", reason: "Content type is not allowlisted for HTTP body capture." };
+  }
+  const truncated = body.length > maxBodySize;
+  const raw = truncated ? body.slice(0, maxBodySize) + "\n[TRUNCATED]" : body;
+  let sanitized;
+  try {
+    const parsed = JSON.parse(raw.replace(/\n\[TRUNCATED]$/, ""));
+    sanitized = JSON.stringify(redactValue(parsed, customFields), null, 2) + (truncated ? "\n[TRUNCATED]" : "");
+  } catch {
+    sanitized = redactText(raw);
+  }
+  const redacted = sanitized !== raw;
+  return {
+    body: sanitized,
+    status: truncated ? "truncated" : redacted ? "redacted" : "captured",
+    reason: truncated ? `Body exceeded configured max size of ${maxBodySize} bytes.` : redacted ? "Sensitive fields or values were redacted before transport." : void 0
+  };
+}
+function isAllowedContentType(contentType, allowed) {
+  if (!contentType) return false;
+  return allowed.some((candidate) => contentType.toLowerCase().includes(candidate.toLowerCase()));
+}
+function redactValue(value, customFields = []) {
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, customFields));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      out[key] = isSensitiveKey(key, customFields) ? "[REDACTED]" : redactValue(child, customFields);
+    }
+    return out;
+  }
+  if (typeof value === "string") return redactText(value);
+  return value;
+}
+function isSensitiveKey(key, customFields) {
+  return /password|passcode|authorization|cookie|otp|token|jwt|secret|refresh|iban|national.?id|card/i.test(key) || customFields.some((field) => field.toLowerCase() === key.toLowerCase());
+}
+function redactText(value) {
+  return value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]").replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_JWT]").replace(/\b(?:\d[ -]*?){13,19}\b/g, "[REDACTED_CARD]");
+}
+function generateRequestId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
+function withTraceHeaders(init, traceId, requestId) {
+  const next = { ...init ?? {} };
+  const headers = new Headers(init?.headers ?? {});
+  const spanId = requestId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
+  headers.set("traceparent", `00-${traceId.replace(/-/g, "").slice(0, 32).padEnd(32, "0")}-${spanId}-01`);
+  headers.set("x-allstak-trace-id", traceId);
+  headers.set("x-allstak-request-id", requestId);
+  next.headers = headers;
+  return next;
 }
 function instrumentConsole(addBreadcrumb) {
   if (typeof console === "undefined") return;
@@ -1772,7 +1980,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "1.2.0";
+var SDK_VERSION = "0.1.3";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
@@ -1869,7 +2077,9 @@ var AllStakClient = class {
       instrumentFetch(
         (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
         (item) => this.captureRequest({ ...item, method: item.method }),
-        baseUrl
+        baseUrl,
+        () => ({ traceId: this.tracing.getTraceId() }),
+        config.httpBodyCapture
       );
       instrumentConsole((type, msg, level, data) => this.addBreadcrumb(type, msg, level, data));
       if (this.isNodeBuild() || typeof process !== "undefined" && process.versions?.node) {
@@ -1909,12 +2119,6 @@ var AllStakClient = class {
       () => this.errors.captureException(error, { ...traceContext, ...context })
     );
   }
-  /**
-   * Temporarily applies the scope-merged effective context onto the shared
-   * config object that {@link ErrorModule} reads from, runs the work, then
-   * restores. Lets `withScope` overrides land on the wire payload without
-   * threading a separate config arg through every capture call site.
-   */
   withScopedConfig(work) {
     if (this.scopeStack.length === 0) return work();
     const eff = mergeScopes(this.config, this.scopeStack);
@@ -1943,11 +2147,6 @@ var AllStakClient = class {
       this.config.level = snap.level;
     }
   }
-  /**
-   * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
-   * extra/context/fingerprint/level set on the scope is visible only on
-   * captures inside the callback. Pop is automatic (sync, async, throwing).
-   */
   withScope(callback) {
     const scope = new Scope();
     this.scopeStack.push(scope);
@@ -2129,6 +2328,9 @@ var AllStakClient = class {
   getSessionId() {
     return this.sessionId;
   }
+  getTransportStats() {
+    return this.transport.getStats();
+  }
   // ------------------------------------------------------------------
   // Distributed Tracing
   // ------------------------------------------------------------------
@@ -2163,6 +2365,47 @@ var AllStakClient = class {
     this._database.destroy();
     this.sessionReplay?.destroy();
     this.uninstallNodeErrorHandlers();
+  }
+  shouldCaptureScreenshot() {
+    const screenshot = this.config.screenshot;
+    if (!screenshot?.enabled || screenshot.captureOnError === false || !screenshot.provider) {
+      return false;
+    }
+    const sampleRate = screenshot.sampleRate ?? 1;
+    return !(sampleRate <= 0 || sampleRate < 1 && Math.random() >= sampleRate);
+  }
+  async withScreenshotMetadata(error, context) {
+    const screenshot = this.config.screenshot;
+    if (!screenshot?.provider) return { ...context, "screenshot.status": "unsupported" };
+    const timeoutMs = Math.max(100, Math.min(screenshot.timeoutMs ?? 1500, 5e3));
+    const maxBytes = Math.max(1024, screenshot.maxBytes ?? 2e5);
+    const traceId = typeof context.traceId === "string" ? context.traceId : void 0;
+    const requestId = typeof context.requestId === "string" ? context.requestId : void 0;
+    try {
+      const artifact = await Promise.race([
+        Promise.resolve(screenshot.provider({ type: "error", error, traceId, requestId })),
+        new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs))
+      ]);
+      if (!artifact) return { ...context, "screenshot.status": "timeout_or_empty" };
+      const size = artifact.sizeBytes ?? byteSize(artifact.data);
+      if (size > maxBytes) {
+        this.transport.noteDropped();
+        return { ...context, "screenshot.status": "dropped_too_large", "screenshot.sizeBytes": size };
+      }
+      return {
+        ...context,
+        "screenshot.status": "captured",
+        "screenshot.contentType": artifact.contentType,
+        "screenshot.width": artifact.width,
+        "screenshot.height": artifact.height,
+        "screenshot.sizeBytes": size,
+        "screenshot.redacted": artifact.redacted ?? false,
+        "screenshot.redactionStrategy": artifact.redactionStrategy,
+        ...artifact.data ? { "screenshot.data": artifact.data } : {}
+      };
+    } catch {
+      return { ...context, "screenshot.status": "failed" };
+    }
   }
   installNodeErrorHandlers() {
     if (typeof process === "undefined" || typeof process.on !== "function") {
@@ -2199,6 +2442,14 @@ var AllStakClient = class {
     }
   }
 };
+function byteSize(value) {
+  if (!value) return 0;
+  try {
+    if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(value).length;
+  } catch {
+  }
+  return value.length;
+}
 
 // src/index.ts
 var instance = null;
@@ -2303,6 +2554,9 @@ var AllStak = {
   },
   getSessionId() {
     return ensureInit().getSessionId();
+  },
+  getTransportStats() {
+    return ensureInit().getTransportStats();
   },
   // ------------------------------------------------------------------
   // Distributed Tracing

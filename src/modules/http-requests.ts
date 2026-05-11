@@ -3,6 +3,8 @@ import { HttpTransport } from '../transport/http';
 export interface HttpRequestItem {
   /** Unique trace identifier — generates one if not provided */
   traceId?: string;
+  /** Unique request identifier — generates one if not provided */
+  requestId?: string;
   /** 'inbound' = request arriving at this service; 'outbound' = request made to external service */
   direction: 'inbound' | 'outbound';
   method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
@@ -12,6 +14,14 @@ export interface HttpRequestItem {
   durationMs: number;
   requestSize?: number;
   responseSize?: number;
+  requestBody?: string;
+  responseBody?: string;
+  requestHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  requestBodyCaptureStatus?: string;
+  responseBodyCaptureStatus?: string;
+  requestBodyCaptureReason?: string;
+  responseBodyCaptureReason?: string;
   userId?: string;
   /** Fingerprint of a linked error event */
   errorFingerprint?: string;
@@ -22,6 +32,7 @@ export interface HttpRequestItem {
 // Matches backend HttpRequestItem DTO exactly
 interface HttpRequestIngestItem {
   traceId: string;
+  requestId: string;
   direction: 'inbound' | 'outbound';
   method: string;
   host: string;
@@ -30,6 +41,14 @@ interface HttpRequestIngestItem {
   durationMs: number;
   requestSize?: number;
   responseSize?: number;
+  requestBody?: string;
+  responseBody?: string;
+  requestHeaders?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  requestBodyCaptureStatus?: string;
+  responseBodyCaptureStatus?: string;
+  requestBodyCaptureReason?: string;
+  responseBodyCaptureReason?: string;
   userId?: string;
   errorFingerprint?: string;
   /** Per-request env / release for accurate filtering on the dashboard. */
@@ -92,6 +111,7 @@ export class HttpRequestModule {
 
     this.queue.push({
       traceId: item.traceId ?? generateTraceId(),
+      requestId: item.requestId ?? generateTraceId(),
       direction: item.direction,
       method: item.method,
       host: item.host,
@@ -100,6 +120,14 @@ export class HttpRequestModule {
       durationMs: item.durationMs,
       requestSize: item.requestSize,
       responseSize: item.responseSize,
+      requestBody: item.requestBody,
+      responseBody: item.responseBody,
+      requestHeaders: item.requestHeaders,
+      responseHeaders: item.responseHeaders,
+      requestBodyCaptureStatus: item.requestBodyCaptureStatus,
+      responseBodyCaptureStatus: item.responseBodyCaptureStatus,
+      requestBodyCaptureReason: item.requestBodyCaptureReason,
+      responseBodyCaptureReason: item.responseBodyCaptureReason,
       userId: item.userId,
       errorFingerprint: item.errorFingerprint,
       environment: this.defaults.environment,

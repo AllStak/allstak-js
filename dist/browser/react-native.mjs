@@ -1,6 +1,7 @@
 import {
-  AllStak
-} from "./chunk-OVCO4NQY.mjs";
+  AllStak,
+  SDK_VERSION
+} from "./chunk-TH5XL7OJ.mjs";
 import {
   __require
 } from "./chunk-46REABUF.mjs";
@@ -122,7 +123,7 @@ function installReactNative(options = {}) {
     }
     AllStak.setIdentity({
       sdkName: "allstak-react-native",
-      sdkVersion: "1.2.0",
+      sdkVersion: SDK_VERSION,
       platform: "react-native",
       dist
     });

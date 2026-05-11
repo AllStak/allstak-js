@@ -146,4 +146,70 @@ describe('Error Module', () => {
     expect(body.user).toEqual({ id: '123', email: 'test@example.com' });
     expect(body.metadata).toMatchObject({ component: 'auth', route: '/api/x' });
   });
+
+  it('captures screenshot metadata through an opt-in fail-open provider', async () => {
+    AllStak.destroy();
+    AllStak.init({
+      dsn: TEST_DSN,
+      environment: 'test',
+      release: '1.0.0',
+      screenshot: {
+        enabled: true,
+        provider: async () => ({
+          data: 'data:image/png;base64,AAAA',
+          contentType: 'image/png',
+          width: 100,
+          height: 50,
+          sizeBytes: 24,
+          redacted: true,
+          redactionStrategy: 'selector-mask',
+        }),
+      },
+    });
+
+    AllStak.captureException(new Error('with screenshot'));
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.metadata).toMatchObject({
+      'screenshot.status': 'captured',
+      'screenshot.contentType': 'image/png',
+      'screenshot.width': 100,
+      'screenshot.height': 50,
+      'screenshot.sizeBytes': 24,
+      'screenshot.redacted': true,
+      'screenshot.redactionStrategy': 'selector-mask',
+      'screenshot.data': 'data:image/png;base64,AAAA',
+    });
+  });
+
+  it('drops oversized screenshots without throwing or blocking error capture', async () => {
+    AllStak.destroy();
+    AllStak.init({
+      dsn: TEST_DSN,
+      environment: 'test',
+      release: '1.0.0',
+      screenshot: {
+        enabled: true,
+        maxBytes: 1024,
+        provider: async () => ({
+          data: 'data:image/png;base64,TOO_BIG',
+          contentType: 'image/png',
+          sizeBytes: 2048,
+        }),
+      },
+    });
+
+    AllStak.captureException(new Error('oversized screenshot'));
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.metadata).toMatchObject({
+      'screenshot.status': 'dropped_too_large',
+      'screenshot.sizeBytes': 2048,
+    });
+    expect(AllStak.getTransportStats().dropped).toBeGreaterThan(0);
+  });
 });

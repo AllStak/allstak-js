@@ -1,5 +1,5 @@
 export { AllStak } from './index.js';
-import './database-C7jn1y4z.js';
+import './database-BIg-JJj9.js';
 
 /**
  * React Native integration for AllStak.

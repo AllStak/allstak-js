@@ -40,6 +40,26 @@
       "types": "./dist/browser/db.d.ts",
       "import": "./dist/browser/db.mjs",
       "require": "./dist/browser/db.js"
+    },
+    "./sourcemaps": {
+      "types": "./dist/node/sourcemaps.d.ts",
+      "import": "./dist/node/sourcemaps.mjs",
+      "require": "./dist/node/sourcemaps.js"
+    },
+    "./vite": {
+      "types": "./dist/node/vite.d.ts",
+      "import": "./dist/node/vite.mjs",
+      "require": "./dist/node/vite.js"
+    },
+    "./webpack": {
+      "types": "./dist/node/webpack.d.ts",
+      "import": "./dist/node/webpack.mjs",
+      "require": "./dist/node/webpack.js"
+    },
+    "./next": {
+      "types": "./dist/node/next.d.ts",
+      "import": "./dist/node/next.mjs",
+      "require": "./dist/node/next.js"
     }
   },
   "files": [
@@ -94,12 +114,16 @@
     "vitest": "^1.3.0"
   },
   "peerDependencies": {
-    "react": ">=16.8.0"
+    "react": ">=16.8.0",
+    "vite": ">=4.0.0",
+    "webpack": ">=5.0.0",
+    "next": ">=13.0.0"
   },
   "peerDependenciesMeta": {
-    "react": {
-      "optional": true
-    }
+    "react": { "optional": true },
+    "vite":  { "optional": true },
+    "webpack": { "optional": true },
+    "next":  { "optional": true }
   },
   "engines": {
     "node": ">=18"

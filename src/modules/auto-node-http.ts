@@ -34,7 +34,7 @@ const PATCHED_FLAG = Symbol.for('@allstak/node-http/patched');
 
 interface PatchableModule {
   request: (...args: unknown[]) => ClientRequest;
-  get: (...args: unknown[]) => ClientRequest;
+  get?: (...args: unknown[]) => ClientRequest;
   [PATCHED_FLAG]?: boolean;
 }
 

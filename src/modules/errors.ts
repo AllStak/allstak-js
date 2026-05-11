@@ -73,6 +73,11 @@ interface ErrorIngestPayload {
   release?: string;
   sessionId?: string;
   traceId?: string;
+  spanId?: string;
+  parentSpanId?: string;
+  requestId?: string;
+  replayId?: string;
+  service?: string;
   user?: { id?: string; email?: string; ip?: string };
   metadata?: Record<string, unknown>;
   breadcrumbs?: Breadcrumb[];
@@ -238,6 +243,12 @@ export class ErrorModule {
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
+      traceId: stringContext(context, 'traceId'),
+      spanId: stringContext(context, 'spanId'),
+      parentSpanId: stringContext(context, 'parentSpanId'),
+      requestId: stringContext(context, 'requestId'),
+      replayId: stringContext(context, 'replayId'),
+      service: stringContext(context, 'service'),
       user: this.config.user,
       metadata: this.buildMetadata(context),
       breadcrumbs: currentBreadcrumbs,
@@ -349,4 +360,10 @@ export class ErrorModule {
       );
     }
   }
+}
+
+function stringContext(context: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = context?.[key];
+  if (typeof value !== 'string') return undefined;
+  return value.trim().length > 0 ? value : undefined;
 }

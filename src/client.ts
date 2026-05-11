@@ -1,4 +1,4 @@
-import { HttpTransport } from './transport/http';
+import { HttpTransport, TransportStats } from './transport/http';
 import { ErrorModule } from './modules/errors';
 import { LogModule, LogLevel } from './modules/logs';
 import { SessionReplayModule } from './modules/session-replay';
@@ -7,7 +7,7 @@ import { CronModule, HeartbeatOptions } from './modules/cron';
 import { TracingModule, Span } from './modules/tracing';
 import { DatabaseModule, DbQueryItem, enableDbAutoInstrumentation } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
-import { instrumentFetch, instrumentConsole } from './modules/auto-breadcrumbs';
+import { instrumentFetch, instrumentConsole, HttpBodyCaptureOptions } from './modules/auto-breadcrumbs';
 import { instrumentNodeHttp } from './modules/auto-node-http';
 import { generateId } from './utils/uuid';
 
@@ -20,7 +20,7 @@ import { generateId } from './utils/uuid';
 export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
-export const SDK_VERSION = '1.2.0';
+export const SDK_VERSION = '0.1.3';
 /** SDK package name. Sent on the wire as `sdk.name`. */
 export const SDK_NAME = 'allstak-js';
 
@@ -50,6 +50,29 @@ export interface ReleaseMetadata {
   sdkName?: string;
   /** SDK semver — defaults to {@link SDK_VERSION}. */
   sdkVersion?: string;
+}
+
+export interface ScreenshotArtifact {
+  /** Data URL or base64-encoded image. Keep below `maxBytes`; oversized images are dropped. */
+  data?: string;
+  contentType?: 'image/png' | 'image/jpeg' | 'image/webp';
+  width?: number;
+  height?: number;
+  sizeBytes?: number;
+  redacted?: boolean;
+  redactionStrategy?: string;
+}
+
+export interface ScreenshotCaptureOptions {
+  /** Off by default. Requires an explicit provider so the SDK does not add a heavy capture dependency. */
+  enabled?: boolean;
+  captureOnError?: boolean;
+  timeoutMs?: number;
+  maxBytes?: number;
+  sampleRate?: number;
+  provider?: (reason: { type: 'error'; error: Error; traceId?: string; requestId?: string }) =>
+    | ScreenshotArtifact | null | undefined
+    | Promise<ScreenshotArtifact | null | undefined>;
 }
 
 export interface AllStakConfig extends ReleaseMetadata {
@@ -100,6 +123,18 @@ export interface AllStakConfig extends ReleaseMetadata {
     maskAllInputs?: boolean;
     sampleRate?: number;
   };
+  /**
+   * Privacy-first HTTP body capture. Disabled by default. When enabled, fetch
+   * instrumentation captures only allowlisted content types, applies automatic
+   * redaction, and truncates bodies to maxBodySize.
+   */
+  httpBodyCapture?: HttpBodyCaptureOptions;
+  /**
+   * Optional fail-open screenshot capture. The SDK never bundles a screenshot
+   * library; customers provide an async provider (e.g. html2canvas wrapper)
+   * and AllStak bounds timeout/size/sampling before adding metadata.
+   */
+  screenshot?: ScreenshotCaptureOptions;
   /**
    * @deprecated Use {@link apiKey} (and optionally {@link host}) instead.
    * If a {@code dsn} is provided we still parse it for backwards-compatibility:
@@ -266,6 +301,8 @@ export class AllStakClient {
         (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
         (item) => this.captureRequest({ ...item, method: item.method as HttpRequestItem['method'] }),
         baseUrl,
+        () => ({ traceId: this.tracing.getTraceId() }),
+        config.httpBodyCapture,
       );
       instrumentConsole((type, msg, level, data) => this.addBreadcrumb(type, msg, level, data));
 
@@ -315,12 +352,6 @@ export class AllStakClient {
     );
   }
 
-  /**
-   * Temporarily applies the scope-merged effective context onto the shared
-   * config object that {@link ErrorModule} reads from, runs the work, then
-   * restores. Lets `withScope` overrides land on the wire payload without
-   * threading a separate config arg through every capture call site.
-   */
   private withScopedConfig<T>(work: () => T): T {
     if (this.scopeStack.length === 0) return work();
     const eff = mergeScopes(this.config, this.scopeStack);
@@ -349,11 +380,6 @@ export class AllStakClient {
     }
   }
 
-  /**
-   * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
-   * extra/context/fingerprint/level set on the scope is visible only on
-   * captures inside the callback. Pop is automatic (sync, async, throwing).
-   */
   withScope<T>(callback: (scope: Scope) => T): T {
     const scope = new Scope();
     this.scopeStack.push(scope);
@@ -562,6 +588,10 @@ export class AllStakClient {
     return this.sessionId;
   }
 
+  getTransportStats(): TransportStats {
+    return this.transport.getStats();
+  }
+
   // ------------------------------------------------------------------
   // Distributed Tracing
   // ------------------------------------------------------------------
@@ -605,6 +635,50 @@ export class AllStakClient {
     this._database.destroy();
     this.sessionReplay?.destroy();
     this.uninstallNodeErrorHandlers();
+  }
+
+  private shouldCaptureScreenshot(): boolean {
+    const screenshot = this.config.screenshot;
+    if (!screenshot?.enabled || screenshot.captureOnError === false || !screenshot.provider) {
+      return false;
+    }
+    const sampleRate = screenshot.sampleRate ?? 1;
+    return !(sampleRate <= 0 || (sampleRate < 1 && Math.random() >= sampleRate));
+  }
+
+  private async withScreenshotMetadata(error: Error, context: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const screenshot = this.config.screenshot;
+    if (!screenshot?.provider) return { ...context, 'screenshot.status': 'unsupported' };
+    const timeoutMs = Math.max(100, Math.min(screenshot.timeoutMs ?? 1500, 5000));
+    const maxBytes = Math.max(1024, screenshot.maxBytes ?? 200_000);
+    const traceId = typeof context.traceId === 'string' ? context.traceId : undefined;
+    const requestId = typeof context.requestId === 'string' ? context.requestId : undefined;
+
+    try {
+      const artifact = await Promise.race([
+        Promise.resolve(screenshot.provider({ type: 'error', error, traceId, requestId })),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+      ]);
+      if (!artifact) return { ...context, 'screenshot.status': 'timeout_or_empty' };
+      const size = artifact.sizeBytes ?? byteSize(artifact.data);
+      if (size > maxBytes) {
+        this.transport.noteDropped();
+        return { ...context, 'screenshot.status': 'dropped_too_large', 'screenshot.sizeBytes': size };
+      }
+      return {
+        ...context,
+        'screenshot.status': 'captured',
+        'screenshot.contentType': artifact.contentType,
+        'screenshot.width': artifact.width,
+        'screenshot.height': artifact.height,
+        'screenshot.sizeBytes': size,
+        'screenshot.redacted': artifact.redacted ?? false,
+        'screenshot.redactionStrategy': artifact.redactionStrategy,
+        ...(artifact.data ? { 'screenshot.data': artifact.data } : {}),
+      };
+    } catch {
+      return { ...context, 'screenshot.status': 'failed' };
+    }
   }
 
   // ─── Node uncaughtException / unhandledRejection auto-capture ─────
@@ -662,4 +736,14 @@ export { DatabaseModule } from './modules/database';
 declare global {
   // eslint-disable-next-line no-var
   var __ALLSTAK_NODE__: boolean | undefined;
+}
+
+function byteSize(value?: string): number {
+  if (!value) return 0;
+  try {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+  } catch {
+    /* ignore */
+  }
+  return value.length;
 }

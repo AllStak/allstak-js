@@ -13,6 +13,7 @@
  * from regular JS bundles without pulling RN modules.
  */
 import { AllStak } from '../index';
+import { SDK_VERSION } from '../client';
 
 type ErrorUtilsShape = {
   getGlobalHandler: () => (error: Error, isFatal?: boolean) => void;
@@ -174,7 +175,7 @@ export function installReactNative(options: ReactNativeInstallOptions = {}): voi
     } catch { /* not running under RN */ }
     AllStak.setIdentity({
       sdkName: 'allstak-react-native',
-      sdkVersion: '1.2.0',
+      sdkVersion: SDK_VERSION,
       platform: 'react-native',
       dist,
     });

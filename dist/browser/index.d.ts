@@ -1,8 +1,10 @@
-import { D as DatabaseModule, a as DbQueryItem } from './database-C7jn1y4z.js';
+import { D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-BIg-JJj9.js';
 
 interface HttpRequestItem {
     /** Unique trace identifier — generates one if not provided */
     traceId?: string;
+    /** Unique request identifier — generates one if not provided */
+    requestId?: string;
     /** 'inbound' = request arriving at this service; 'outbound' = request made to external service */
     direction: 'inbound' | 'outbound';
     method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
@@ -12,6 +14,14 @@ interface HttpRequestItem {
     durationMs: number;
     requestSize?: number;
     responseSize?: number;
+    requestBody?: string;
+    responseBody?: string;
+    requestHeaders?: Record<string, string>;
+    responseHeaders?: Record<string, string>;
+    requestBodyCaptureStatus?: string;
+    responseBodyCaptureStatus?: string;
+    requestBodyCaptureReason?: string;
+    responseBodyCaptureReason?: string;
     userId?: string;
     /** Fingerprint of a linked error event */
     errorFingerprint?: string;
@@ -84,6 +94,13 @@ declare class Span {
     get spanId(): string;
     get traceId(): string;
     get isFinished(): boolean;
+}
+
+interface HttpBodyCaptureOptions {
+    enabled?: boolean;
+    maxBodySize?: number;
+    contentTypes?: string[];
+    redactFields?: string[];
 }
 
 /**
@@ -165,6 +182,30 @@ interface ReleaseMetadata {
     /** SDK semver — defaults to {@link SDK_VERSION}. */
     sdkVersion?: string;
 }
+interface ScreenshotArtifact {
+    /** Data URL or base64-encoded image. Keep below `maxBytes`; oversized images are dropped. */
+    data?: string;
+    contentType?: 'image/png' | 'image/jpeg' | 'image/webp';
+    width?: number;
+    height?: number;
+    sizeBytes?: number;
+    redacted?: boolean;
+    redactionStrategy?: string;
+}
+interface ScreenshotCaptureOptions {
+    /** Off by default. Requires an explicit provider so the SDK does not add a heavy capture dependency. */
+    enabled?: boolean;
+    captureOnError?: boolean;
+    timeoutMs?: number;
+    maxBytes?: number;
+    sampleRate?: number;
+    provider?: (reason: {
+        type: 'error';
+        error: Error;
+        traceId?: string;
+        requestId?: string;
+    }) => ScreenshotArtifact | null | undefined | Promise<ScreenshotArtifact | null | undefined>;
+}
 interface AllStakConfig extends ReleaseMetadata {
     /**
      * Project API key from the AllStak dashboard (`ask_live_…`).
@@ -217,6 +258,18 @@ interface AllStakConfig extends ReleaseMetadata {
         sampleRate?: number;
     };
     /**
+     * Privacy-first HTTP body capture. Disabled by default. When enabled, fetch
+     * instrumentation captures only allowlisted content types, applies automatic
+     * redaction, and truncates bodies to maxBodySize.
+     */
+    httpBodyCapture?: HttpBodyCaptureOptions;
+    /**
+     * Optional fail-open screenshot capture. The SDK never bundles a screenshot
+     * library; customers provide an async provider (e.g. html2canvas wrapper)
+     * and AllStak bounds timeout/size/sampling before adding metadata.
+     */
+    screenshot?: ScreenshotCaptureOptions;
+    /**
      * @deprecated Use {@link apiKey} (and optionally {@link host}) instead.
      * If a {@code dsn} is provided we still parse it for backwards-compatibility:
      * the username is taken as the API key and the origin as the host.
@@ -238,18 +291,7 @@ declare class AllStakClient {
     constructor(config: AllStakConfig);
     private isNodeBuild;
     captureException(error: Error, context?: Record<string, unknown>): void;
-    /**
-     * Temporarily applies the scope-merged effective context onto the shared
-     * config object that {@link ErrorModule} reads from, runs the work, then
-     * restores. Lets `withScope` overrides land on the wire payload without
-     * threading a separate config arg through every capture call site.
-     */
     private withScopedConfig;
-    /**
-     * Run `callback` with a fresh, temporary {@link Scope}. Any user/tag/
-     * extra/context/fingerprint/level set on the scope is visible only on
-     * captures inside the callback. Pop is automatic (sync, async, throwing).
-     */
     withScope<T>(callback: (scope: Scope) => T): T;
     getCurrentScope(): Scope | null;
     addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void;
@@ -335,6 +377,7 @@ declare class AllStakClient {
         dist?: string;
     }): void;
     getSessionId(): string;
+    getTransportStats(): TransportStats;
     /**
      * Start a new span. Automatically parented to the current active span.
      * Call `span.finish()` when the operation completes.
@@ -352,6 +395,8 @@ declare class AllStakClient {
     /** Reset trace context (trace ID and span stack). */
     resetTrace(): void;
     destroy(): void;
+    private shouldCaptureScreenshot;
+    private withScreenshotMetadata;
     private nodeUncaughtHandler;
     private nodeRejectionHandler;
     private installNodeErrorHandlers;
@@ -471,6 +516,7 @@ declare const AllStak: {
      */
     withScope<T>(callback: (scope: Scope) => T): T;
     getSessionId(): string;
+    getTransportStats(): TransportStats;
     /**
      * Start a new span. Automatically parented to the current active span.
      * Call `span.finish()` when the operation completes.
@@ -492,4 +538,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Scope, Span, type SpanData };
+export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, TransportStats };

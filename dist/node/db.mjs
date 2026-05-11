@@ -9,7 +9,8 @@ import {
   markOwnedByOrm,
   normalizeQuery,
   safeCapture
-} from "./chunk-NY4SCN2B.mjs";
+} from "./chunk-CCEC2445.mjs";
+import "./chunk-6GVGKK5H.mjs";
 
 // src/integrations/db/prisma.ts
 function instrumentPrisma(prisma, dbModule, config = {}) {

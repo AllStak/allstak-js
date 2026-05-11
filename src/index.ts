@@ -1,13 +1,15 @@
 import { AllStakClient, AllStakConfig } from './client';
 import { Scope } from './scope';
 export { Scope } from './scope';
+import type { TransportStats } from './transport/http';
 import type { HttpRequestItem } from './modules/http-requests';
 import type { HeartbeatOptions } from './modules/cron';
 import type { Span } from './modules/tracing';
 import type { DbQueryItem } from './modules/database';
 import type { DatabaseModule } from './modules/database';
 
-export type { AllStakConfig } from './client';
+export type { AllStakConfig, ScreenshotArtifact, ScreenshotCaptureOptions } from './client';
+export type { TransportStats } from './transport/http';
 export type { ErrorEvent, Breadcrumb } from './modules/errors';
 export type { LogEvent, LogLevel } from './modules/logs';
 export type { ReplayEvent, DOMEvent } from './modules/session-replay';
@@ -151,6 +153,10 @@ export const AllStak = {
 
   getSessionId(): string {
     return ensureInit().getSessionId();
+  },
+
+  getTransportStats(): TransportStats {
+    return ensureInit().getTransportStats();
   },
 
   // ------------------------------------------------------------------

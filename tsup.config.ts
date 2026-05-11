@@ -34,6 +34,14 @@ export default defineConfig([
       express: 'src/integrations/express.ts',
       cron: 'src/integrations/cron.ts',
       db: 'src/integrations/db/index.ts',
+      // Build-time source-map tooling. Node-only — these entries must
+      // never appear in the browser config above. Vite/Webpack/Next are
+      // optional peer-deps and the plugin entries import them indirectly
+      // through duck-typed config objects, so they're not bundled here.
+      sourcemaps: 'src/sourcemaps/index.ts',
+      vite: 'src/integrations/vite.ts',
+      webpack: 'src/integrations/webpack.ts',
+      next: 'src/integrations/next.ts',
     },
     format: ['cjs', 'esm'],
     dts: true,

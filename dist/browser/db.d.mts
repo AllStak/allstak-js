@@ -1,4 +1,4 @@
-import { D as DatabaseModule } from './database-C7jn1y4z.mjs';
+import { D as DatabaseModule } from './database-BIg-JJj9.mjs';
 
 /**
  * Shared helpers used by every DB integration under `src/integrations/db/`.
