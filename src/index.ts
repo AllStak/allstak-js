@@ -36,12 +36,16 @@ export const AllStak = {
   },
 
   addBreadcrumb(
-    type: string,
-    message: string,
+    typeOrCrumb: string | { type: string; message: string; level?: string; data?: Record<string, unknown> },
+    message?: string,
     level?: string,
     data?: Record<string, unknown>,
   ): void {
-    ensureInit().addBreadcrumb(type, message, level, data);
+    if (typeof typeOrCrumb === 'object') {
+      ensureInit().addBreadcrumb(typeOrCrumb.type, typeOrCrumb.message, typeOrCrumb.level, typeOrCrumb.data);
+    } else {
+      ensureInit().addBreadcrumb(typeOrCrumb, message!, level, data);
+    }
   },
 
   clearBreadcrumbs(): void {
@@ -204,6 +208,8 @@ export const AllStak = {
     return instance;
   },
 };
+
+export default AllStak;
 
 function ensureInit(): AllStakClient {
   if (!instance) {

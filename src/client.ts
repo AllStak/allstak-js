@@ -20,7 +20,7 @@ import { generateId } from './utils/uuid';
 export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
-export const SDK_VERSION = '0.2.0';
+export const SDK_VERSION = '0.2.2';
 /** SDK package name. Sent on the wire as `sdk.name`. */
 export const SDK_NAME = 'allstak-js';
 
@@ -406,12 +406,16 @@ export class AllStakClient {
   }
 
   addBreadcrumb(
-    type: string,
-    message: string,
+    typeOrCrumb: string | { type: string; message: string; level?: string; data?: Record<string, unknown> },
+    message?: string,
     level?: string,
     data?: Record<string, unknown>,
   ): void {
-    this.errors.addBreadcrumb(type, message, level, data);
+    if (typeof typeOrCrumb === 'object') {
+      this.errors.addBreadcrumb(typeOrCrumb.type, typeOrCrumb.message, typeOrCrumb.level, typeOrCrumb.data);
+    } else {
+      this.errors.addBreadcrumb(typeOrCrumb, message!, level, data);
+    }
   }
 
   clearBreadcrumbs(): void {

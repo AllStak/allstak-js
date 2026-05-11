@@ -181,11 +181,19 @@ function patchSqlite3(dbModule: DatabaseModule, config: DbIntegrationConfig): bo
 
 function patchNodeSqlite(dbModule: DatabaseModule, config: DbIntegrationConfig): boolean {
   // node:sqlite is a built-in (Node 22+). tryRequire will pick it up.
+  // Suppress the ExperimentalWarning that Node emits on first require —
+  // the warning pollutes production logs and we handle failures gracefully.
   type NodeSqlite = {
     DatabaseSync?: { prototype: Record<string, unknown> };
     StatementSync?: { prototype: Record<string, unknown> };
   };
+  const origEmit = process.emitWarning;
+  process.emitWarning = function (warning: string | Error, ...args: unknown[]) {
+    if (typeof warning === 'string' && warning.includes('SQLite is an experimental feature')) return;
+    return (origEmit as Function).call(process, warning, ...args);
+  } as typeof process.emitWarning;
   const mod = tryRequire<NodeSqlite>('node:sqlite');
+  process.emitWarning = origEmit;
   if (!mod?.DatabaseSync?.prototype) return false;
 
   const dbProto = mod.DatabaseSync.prototype;
