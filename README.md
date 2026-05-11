@@ -3,7 +3,7 @@
 **Track errors, logs, HTTP calls, and cron jobs in your Node.js app in under 30 seconds.**
 
 [![npm version](https://img.shields.io/npm/v/@allstak/js.svg)](https://www.npmjs.com/package/@allstak/js)
-[![CI](https://github.com/allstak-io/allstak-js/actions/workflows/ci.yml/badge.svg)](https://github.com/allstak-io/allstak-js/actions)
+[![CI](https://github.com/AllStak/allstak-js/actions/workflows/ci.yml/badge.svg)](https://github.com/AllStak/allstak-js/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Official AllStak SDK for Node.js — captures errors, structured logs, inbound/outbound HTTP, database queries, distributed traces, and cron heartbeats.
@@ -206,7 +206,7 @@ AllStak.init({ apiKey: '...', host: 'https://allstak.mycorp.com' });
 
 - Documentation: https://docs.allstak.sa
 - Dashboard: https://app.allstak.sa
-- Source: https://github.com/allstak-io/allstak-js
+- Source: https://github.com/AllStak/allstak-js
 
 ## License
 
