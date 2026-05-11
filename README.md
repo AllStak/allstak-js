@@ -25,18 +25,6 @@ View captured events live at [app.allstak.sa](https://app.allstak.sa).
 - Breadcrumbs ring buffer with auto-capture from `console` and `fetch`
 - Express middleware entry point at `@allstak/js/express`
 
-## What You Get
-
-Once integrated, every event flows to your AllStak dashboard:
-
-- **Errors** — stack traces, breadcrumbs, release + environment tags
-- **Logs** — structured logs with search and filters
-- **HTTP** — inbound and outbound request timing, status codes, failed calls
-- **Database** — query capture for `pg` and `mysql2` with statement normalization
-- **Traces** — distributed spans across services
-- **Cron monitors** — scheduled job success/failure tracking
-- **Alerts** — email and webhook notifications on regressions
-
 ## Installation
 
 ```bash
@@ -108,6 +96,102 @@ Send a cron heartbeat:
 
 ```ts
 AllStak.heartbeat({ slug: 'daily-report', status: 'ok', durationMs: 1234 });
+```
+
+## Source Maps
+
+The SDK ships build-tool plugins that inject a **debug ID** into each bundle
+and its corresponding `.map` file, then upload the source map to AllStak.
+No separate CLI is required.
+
+### Vite
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import { allstakVitePlugin } from '@allstak/js/vite';
+
+export default defineConfig({
+  plugins: [
+    react(),
+    allstakVitePlugin({
+      release: process.env.RELEASE ?? 'web@1.0.0',
+      token: process.env.ALLSTAK_UPLOAD_TOKEN,
+      dist: 'web',
+    }),
+  ],
+  build: { sourcemap: true },
+});
+```
+
+### Next.js source-map helper
+
+```js
+// next.config.js
+const { withAllStak } = require('@allstak/js/next');
+
+module.exports = withAllStak(
+  {
+    release: process.env.RELEASE ?? 'web@1.0.0',
+    token: process.env.ALLSTAK_UPLOAD_TOKEN,
+    dist: 'web',
+  },
+  {
+    // your existing Next config
+  },
+);
+```
+
+For the Stable Next.js runtime integration, install `@allstak/next`. The
+`@allstak/js/next` export remains a build-time source-map helper for existing
+projects and should not be presented as the primary Next.js runtime SDK.
+
+### Webpack
+
+```js
+// webpack.config.js
+const { AllStakWebpackPlugin } = require('@allstak/js/webpack');
+
+module.exports = {
+  devtool: 'source-map',
+  plugins: [
+    new AllStakWebpackPlugin({
+      release: process.env.RELEASE ?? 'web@1.0.0',
+      token: process.env.ALLSTAK_UPLOAD_TOKEN,
+      dist: 'web',
+    }),
+  ],
+};
+```
+
+### What the plugin does
+
+For every `.js` + `.js.map` pair in the build output it:
+
+1. Generates a stable per-bundle UUID (reused across rebuilds — idempotent).
+2. Appends `//# debugId=<uuid>` to the bundle and writes the same UUID
+   into the source map's top-level `debugId` field.
+3. Inlines a tiny self-registration snippet so the bundle, when
+   executed in the browser, populates `globalThis._allstakDebugIds` —
+   the SDK's runtime resolver reads from that map to attach the right
+   debug ID to each stack frame.
+4. Uploads the source map (and optionally the bundle) to AllStak via
+   `POST /api/v1/artifacts/upload`. Skipped automatically when
+   `token` is empty so the same config works in local dev.
+
+If you need finer control (custom build tool, monorepo orchestration),
+the underlying API is exported from `@allstak/js/sourcemaps`:
+
+```ts
+import { processBuildOutput } from '@allstak/js/sourcemaps';
+
+await processBuildOutput({
+  dir: 'dist',
+  release: process.env.RELEASE!,
+  token: process.env.ALLSTAK_UPLOAD_TOKEN!,
+  dist: 'web',
+});
 ```
 
 ## Production Endpoint
