@@ -1,7 +1,7 @@
 {
   "name": "@allstak/js",
   "version": "0.2.2",
-  "description": "Official AllStak JavaScript/TypeScript SDK — error tracking, structured logs, HTTP + DB monitoring, distributed tracing, and cron monitoring for Node.js applications.",
+  "description": "Official AllStak JavaScript/TypeScript SDK \u2014 error tracking, structured logs, HTTP + DB monitoring, distributed tracing, and cron monitoring for Node.js applications.",
   "main": "./dist/node/index.js",
   "module": "./dist/node/index.mjs",
   "types": "./dist/node/index.d.ts",
@@ -135,5 +135,11 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp"
+    ]
   }
 }
