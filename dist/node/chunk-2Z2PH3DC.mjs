@@ -1,9 +1,8 @@
-var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
-}) : x)(function(x) {
-  if (typeof require !== "undefined") return require.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
+import { createRequire as __allstakCreateRequire } from 'node:module';
+const require = __allstakCreateRequire(import.meta.url);
+import {
+  __require
+} from "./chunk-6GVGKK5H.mjs";
 
 // src/integrations/db/shared.ts
 var traceResolver = null;
@@ -408,7 +407,13 @@ function patchSqlite3(dbModule, config) {
   return true;
 }
 function patchNodeSqlite(dbModule, config) {
+  const origEmit = process.emitWarning;
+  process.emitWarning = function(warning, ...args) {
+    if (typeof warning === "string" && warning.includes("SQLite is an experimental feature")) return;
+    return origEmit.call(process, warning, ...args);
+  };
   const mod = tryRequire("node:sqlite");
+  process.emitWarning = origEmit;
   if (!mod?.DatabaseSync?.prototype) return false;
   const dbProto = mod.DatabaseSync.prototype;
   const origPrepare = dbProto.prepare;
@@ -464,7 +469,6 @@ function instrumentSqlite(dbModule, config = {}) {
 }
 
 export {
-  __require,
   setTraceResolver,
   normalizeQuery,
   hashQuery,
@@ -475,4 +479,4 @@ export {
   instrumentMysql2,
   instrumentSqlite
 };
-//# sourceMappingURL=chunk-46REABUF.mjs.map
+//# sourceMappingURL=chunk-2Z2PH3DC.mjs.map

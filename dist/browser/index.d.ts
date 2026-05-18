@@ -294,7 +294,12 @@ declare class AllStakClient {
     private withScopedConfig;
     withScope<T>(callback: (scope: Scope) => T): T;
     getCurrentScope(): Scope | null;
-    addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void;
+    addBreadcrumb(typeOrCrumb: string | {
+        type: string;
+        message: string;
+        level?: string;
+        data?: Record<string, unknown>;
+    }, message?: string, level?: string, data?: Record<string, unknown>): void;
     clearBreadcrumbs(): void;
     /**
      * Capture a freeform message. Routes to the **logs** ingest stream by default
@@ -307,6 +312,8 @@ declare class AllStakClient {
      */
     captureMessage(message: string, level?: 'fatal' | 'error' | 'warning' | 'info', options?: {
         as?: 'log' | 'error' | 'both';
+        data?: Record<string, unknown>;
+        metadata?: Record<string, unknown>;
     }): void;
     /**
      * Report an HTTP request (inbound or outbound).
@@ -449,7 +456,12 @@ interface ReplayEvent {
 declare const AllStak: {
     init(config: AllStakConfig): AllStakClient;
     captureException(error: Error, context?: Record<string, unknown>): void;
-    addBreadcrumb(type: string, message: string, level?: string, data?: Record<string, unknown>): void;
+    addBreadcrumb(typeOrCrumb: string | {
+        type: string;
+        message: string;
+        level?: string;
+        data?: Record<string, unknown>;
+    }, message?: string, level?: string, data?: Record<string, unknown>): void;
     clearBreadcrumbs(): void;
     /** Phase 3 — runtime SDK-identity override (used by RN install). */
     setIdentity(identity: {
@@ -466,6 +478,8 @@ declare const AllStak: {
      */
     captureMessage(message: string, level?: "fatal" | "error" | "warning" | "info", options?: {
         as?: "log" | "error" | "both";
+        data?: Record<string, unknown>;
+        metadata?: Record<string, unknown>;
     }): void;
     /**
      * Report an HTTP request (inbound or outbound) to AllStak.
@@ -538,4 +552,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, TransportStats };
+export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, TransportStats, AllStak as default };

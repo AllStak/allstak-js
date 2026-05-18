@@ -1,10 +1,10 @@
 import {
   AllStak,
   SDK_VERSION
-} from "./chunk-TH5XL7OJ.mjs";
+} from "./chunk-A6UYKKVE.mjs";
 import {
   __require
-} from "./chunk-46REABUF.mjs";
+} from "./chunk-KENGFPTD.mjs";
 
 // src/integrations/react-native.ts
 function instrumentXmlHttpRequest() {
