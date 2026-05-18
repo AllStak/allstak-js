@@ -66,7 +66,7 @@ export const AllStak = {
   captureMessage(
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
-    options?: { as?: 'log' | 'error' | 'both' },
+    options?: { as?: 'log' | 'error' | 'both'; data?: Record<string, unknown>; metadata?: Record<string, unknown> },
   ): void {
     ensureInit().captureMessage(message, level, options);
   },

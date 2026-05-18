@@ -1,5 +1,6 @@
 import { HttpTransport } from '../transport/http';
 import { AllStakConfig } from '../client';
+import { redactObject } from '../utils/redact';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
@@ -55,6 +56,12 @@ export class LogModule {
       this.onLogBreadcrumb(level, message);
     }
 
+    // Redact caller-supplied metadata before serialisation. The structural
+    // routing fields below (service/traceId/etc.) are read from the raw
+    // `meta` since they're SDK-controlled scalar identifiers, never secrets.
+    const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
+    const safeMeta = redactObject(meta, { extraKeys });
+
     const payload: LogIngestPayload = {
       level,
       message,
@@ -66,7 +73,7 @@ export class LogModule {
       requestId: meta?.requestId as string | undefined,
       userId: (meta?.userId as string | undefined) ?? this.config.user?.id,
       errorId: meta?.errorId as string | undefined,
-      metadata: meta,
+      metadata: safeMeta,
     };
     this.transport.send(INGEST_PATH, payload);
   }

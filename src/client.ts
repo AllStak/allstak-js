@@ -434,17 +434,21 @@ export class AllStakClient {
   captureMessage(
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
-    options: { as?: 'log' | 'error' | 'both' } = {},
+    options: { as?: 'log' | 'error' | 'both'; data?: Record<string, unknown>; metadata?: Record<string, unknown> } = {},
   ): void {
     const as = options.as ?? (level === 'fatal' || level === 'error' ? 'both' : 'log');
+    // Accept both `data` (per the historical public .d.ts) and `metadata`
+    // (current SDK convention). Caller-supplied keys are redacted downstream
+    // in logs.send + errors.captureMessage before reaching the wire.
+    const callerMeta = options.metadata ?? options.data;
     if (as === 'log' || as === 'both') {
       // Map error->error, warning->warn, fatal->fatal, info->info
       const logLevel = (level === 'warning' ? 'warn' : level) as
         'debug' | 'info' | 'warn' | 'error' | 'fatal';
-      this.logs.send(logLevel, message);
+      this.logs.send(logLevel, message, callerMeta);
     }
     if (as === 'error' || as === 'both') {
-      this.withScopedConfig(() => this.errors.captureMessage(message, level));
+      this.withScopedConfig(() => this.errors.captureMessage(message, level, { metadata: callerMeta }));
     }
   }
 

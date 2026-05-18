@@ -2,6 +2,7 @@ import { HttpTransport } from '../transport/http';
 import { AllStakConfig, SDK_NAME, SDK_VERSION } from '../client';
 import { parseStack } from '../utils/stack';
 import { resolveDebugId } from '../utils/debug-id';
+import { redactObject } from '../utils/redact';
 
 export interface ErrorEvent {
   type: 'error';
@@ -216,8 +217,14 @@ export class ErrorModule {
     // than re-splitting the raw stack — fewer divergent code paths.
     const stackTrace = frames.length > 0 ? frames.map(frameToString) : undefined;
 
-    // Drain breadcrumbs and attach to the error payload
-    const currentBreadcrumbs = this.breadcrumbs.length > 0 ? [...this.breadcrumbs] : undefined;
+    // Drain breadcrumbs and attach to the error payload. Each breadcrumb's
+    // free-form `data` field is caller-controlled, so it must go through
+    // the same redactor as captureException's context arg.
+    const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
+    const currentBreadcrumbs =
+      this.breadcrumbs.length > 0
+        ? this.breadcrumbs.map((bc) => (bc.data ? { ...bc, data: redactObject(bc.data, { extraKeys }) } : bc))
+        : undefined;
     this.breadcrumbs = [];
 
     if (!this.passesSampleRate()) return;
@@ -262,9 +269,14 @@ export class ErrorModule {
   captureMessage(
     message: string,
     level: 'fatal' | 'error' | 'warning' | 'info' = 'info',
+    options?: { data?: Record<string, unknown>; metadata?: Record<string, unknown> },
   ): void {
     if (!this.passesSampleRate()) return;
     const platform = this.config.platform || detectPlatform();
+    // Accept both `data` (legacy / per the public .d.ts) and `metadata`
+    // (current SDK convention). Caller-supplied keys are redacted before
+    // they reach the wire.
+    const callerMeta = options?.metadata ?? options?.data;
     const payload: any = {
       exceptionClass: 'Message',
       message,
@@ -277,7 +289,7 @@ export class ErrorModule {
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: this.buildMetadata(),
+      metadata: this.buildMetadata(callerMeta),
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint,
     };
@@ -295,11 +307,18 @@ export class ErrorModule {
   }
 
   private buildMetadata(perCallContext?: Record<string, unknown>): Record<string, unknown> {
+    // Redact caller-owned inputs (per-call context, configured tags/extras)
+    // BEFORE merging so the assembled metadata is safe by construction.
+    // Release tags are SDK-owned and not subject to redaction.
+    const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
+    const safePerCall = redactObject(perCallContext, { extraKeys });
+    const safeTags = redactObject(this.config.tags as Record<string, unknown> | undefined, { extraKeys });
+    const safeExtras = redactObject((this.config as any).extras as Record<string, unknown> | undefined, { extraKeys });
     const out: Record<string, unknown> = {
       ...this.releaseTags(),
-      ...this.config.tags,
-      ...((this.config as any).extras ?? {}),
-      ...(perCallContext ?? {}),
+      ...(safeTags ?? {}),
+      ...(safeExtras ?? {}),
+      ...(safePerCall ?? {}),
     };
     const contexts = (this.config as any).contexts as Record<string, Record<string, unknown>> | undefined;
     if (contexts) {
