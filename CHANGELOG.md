@@ -5,6 +5,45 @@ All notable changes to `@allstak/js` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-05-18
+
+### Security (CRITICAL)
+
+- **`captureException(error, context)` no longer ships caller-supplied context
+  to ingest verbatim.** Pre-fix versions transmitted any sensitive keys passed
+  in the context object (e.g. `authorization`, `cookie`, `*token`, `*api_key`,
+  `*password`, `*secret`, `*jwt`, `*csrf`, etc.) in plaintext. See
+  `docs/reports/wizard-full-cycle-e2e-2026-05-18.md` Finding #1 for the full
+  audit trail.
+- New `src/utils/redact.ts` ports the redactor pattern already shipped in the
+  PHP, Go, NestJS, Fastify, and OTel SDKs. Default deny-list matches
+  `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`,
+  `x-auth-token`, `x-access-token`, `x-allstak-key`, plus key-suffix patterns
+  `*token`, `*api_key`, `*password`, `*passwd`, `*secret`, `*session_id`,
+  `*csrf`, `*jwt`, `*bearer`. Case-insensitive; recursive over plain objects
+  and arrays; cycle-safe via `WeakMap`; depth-capped at 12 levels; never
+  mutates caller input.
+- Applied to `captureException` per-call context, `captureMessage`
+  options.metadata / options.data, `Logs.send` metadata, breadcrumb `data`
+  (redacted at drain time), and `config.tags` / `config.extras`.
+- Caller may extend the deny-list:
+  `AllStak.init({ redactKeys: ['internal_id', /^x-tenant-/] })`.
+
+### Fixed
+
+- **`captureMessage(msg, level, { data: ... })` no longer silently drops the
+  `data` field.** The public `.d.ts` advertised this option from the initial
+  release but the implementation never serialised it. Both `data` and
+  `metadata` are now accepted and forwarded (redacted) to log + error streams.
+
+### Tests
+
+- 16 new tests in `tests/redaction.test.ts` cover the deny-list, custom
+  patterns, nested object/array walks, cycle handling, depth cap, end-to-end
+  `captureException` redaction, breadcrumb data redaction, and the
+  `captureMessage` options.data / metadata fix. Total suite: 118 → 134 tests,
+  all green.
+
 ## [0.2.0] — 2026-04-11
 
 ### Added

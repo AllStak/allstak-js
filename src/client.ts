@@ -20,7 +20,7 @@ import { generateId } from './utils/uuid';
 export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
-export const SDK_VERSION = '0.2.2';
+export const SDK_VERSION = '0.2.3';
 /** SDK package name. Sent on the wire as `sdk.name`. */
 export const SDK_NAME = 'allstak-js';
 

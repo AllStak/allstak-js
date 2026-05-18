@@ -1,6 +1,6 @@
 {
   "name": "@allstak/js",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Official AllStak JavaScript/TypeScript SDK \u2014 error tracking, structured logs, HTTP + DB monitoring, distributed tracing, and cron monitoring for Node.js applications.",
   "main": "./dist/node/index.js",
   "module": "./dist/node/index.mjs",
