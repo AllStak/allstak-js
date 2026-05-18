@@ -311,6 +311,90 @@ function resolveDebugId(filename) {
   return void 0;
 }
 
+// src/utils/redact.ts
+var REDACTED = "[REDACTED]";
+var DEFAULT_REDACTED_KEY_PATTERNS = [
+  /(^|\.)authorization$/i,
+  /(^|\.)proxy-authorization$/i,
+  /(^|\.)cookie$/i,
+  /(^|\.)set-cookie$/i,
+  /(^|\.)x-api-key$/i,
+  /(^|\.)x-auth-token$/i,
+  /(^|\.)x-access-token$/i,
+  /(^|\.)x-allstak-key$/i,
+  /(^|[._-])token$/i,
+  /(^|[._-])api[._-]?key$/i,
+  /(^|[._-])password$/i,
+  /(^|[._-])passwd$/i,
+  /(^|[._-])secret$/i,
+  /(^|[._-])session[._-]?id$/i,
+  /(^|[._-])csrf$/i,
+  /(^|[._-])jwt$/i,
+  /(^|[._-])bearer$/i
+];
+var DEFAULT_MAX_DEPTH = 12;
+function isSensitiveKey(key, extra = []) {
+  for (const p of DEFAULT_REDACTED_KEY_PATTERNS) if (p.test(key)) return true;
+  for (const p of extra) if (p.test(key)) return true;
+  return false;
+}
+function compileExtraPatterns(extra) {
+  if (!extra) return [];
+  const out = [];
+  for (const p of extra) {
+    if (!p) continue;
+    if (p instanceof RegExp) {
+      out.push(p);
+      continue;
+    }
+    try {
+      out.push(new RegExp(escapeRegex(p), "i"));
+    } catch {
+    }
+  }
+  return out;
+}
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function redactObject(input, options = {}) {
+  if (input == null) return input;
+  const extra = compileExtraPatterns(options.extraKeys);
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+  const seen = /* @__PURE__ */ new WeakMap();
+  return walk(input, extra, 0, maxDepth, seen);
+}
+function walk(node, extra, depth, maxDepth, seen) {
+  if (node == null) return node;
+  const t = typeof node;
+  if (t !== "object") return node;
+  if (depth >= maxDepth) return "[MaxDepth]";
+  const asObj = node;
+  if (seen.has(asObj)) return "[Circular]";
+  if (Array.isArray(node)) {
+    const out2 = new Array(node.length);
+    seen.set(asObj, out2);
+    for (let i = 0; i < node.length; i++) {
+      out2[i] = walk(node[i], extra, depth + 1, maxDepth, seen);
+    }
+    return out2;
+  }
+  const proto = Object.getPrototypeOf(node);
+  if (proto !== Object.prototype && proto !== null) {
+    return node;
+  }
+  const out = {};
+  seen.set(asObj, out);
+  for (const [k, v] of Object.entries(node)) {
+    if (isSensitiveKey(k, extra)) {
+      out[k] = REDACTED;
+      continue;
+    }
+    out[k] = walk(v, extra, depth + 1, maxDepth, seen);
+  }
+  return out;
+}
+
 // src/modules/errors.ts
 function detectPlatform() {
   if (typeof globalThis.HermesInternal !== "undefined") return "react-native";
@@ -403,7 +487,8 @@ var ErrorModule = class {
     for (const f of frames) if (f.debugId) debugIdSet.add(f.debugId);
     const debugMeta = debugIdSet.size > 0 ? { images: Array.from(debugIdSet).map((id) => ({ type: "sourcemap", debugId: id })) } : void 0;
     const stackTrace = frames.length > 0 ? frames.map(frameToString) : void 0;
-    const currentBreadcrumbs = this.breadcrumbs.length > 0 ? [...this.breadcrumbs] : void 0;
+    const extraKeys = this.config.redactKeys;
+    const currentBreadcrumbs = this.breadcrumbs.length > 0 ? this.breadcrumbs.map((bc) => bc.data ? { ...bc, data: redactObject(bc.data, { extraKeys }) } : bc) : void 0;
     this.breadcrumbs = [];
     if (!this.passesSampleRate()) return;
     const exceptionClass = (error.name && error.name !== "Error" ? error.name : void 0) || error.constructor?.name || "Error";
@@ -435,9 +520,10 @@ var ErrorModule = class {
     };
     this.sendThroughBeforeSend(payload);
   }
-  captureMessage(message, level = "info") {
+  captureMessage(message, level = "info", options) {
     if (!this.passesSampleRate()) return;
     const platform = this.config.platform || detectPlatform();
+    const callerMeta = options?.metadata ?? options?.data;
     const payload = {
       exceptionClass: "Message",
       message,
@@ -450,7 +536,7 @@ var ErrorModule = class {
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: this.buildMetadata(),
+      metadata: this.buildMetadata(callerMeta),
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint
     };
@@ -464,11 +550,15 @@ var ErrorModule = class {
     return Math.random() < r;
   }
   buildMetadata(perCallContext) {
+    const extraKeys = this.config.redactKeys;
+    const safePerCall = redactObject(perCallContext, { extraKeys });
+    const safeTags = redactObject(this.config.tags, { extraKeys });
+    const safeExtras = redactObject(this.config.extras, { extraKeys });
     const out = {
       ...this.releaseTags(),
-      ...this.config.tags,
-      ...this.config.extras ?? {},
-      ...perCallContext ?? {}
+      ...safeTags ?? {},
+      ...safeExtras ?? {},
+      ...safePerCall ?? {}
     };
     const contexts = this.config.contexts;
     if (contexts) {
@@ -546,6 +636,8 @@ var LogModule = class {
     if (this.onLogBreadcrumb && BREADCRUMB_LOG_LEVELS.has(level)) {
       this.onLogBreadcrumb(level, message);
     }
+    const extraKeys = this.config.redactKeys;
+    const safeMeta = redactObject(meta, { extraKeys });
     const payload = {
       level,
       message,
@@ -557,7 +649,7 @@ var LogModule = class {
       requestId: meta?.requestId,
       userId: meta?.userId ?? this.config.user?.id,
       errorId: meta?.errorId,
-      metadata: meta
+      metadata: safeMeta
     };
     this.transport.send(INGEST_PATH2, payload);
   }
@@ -1496,7 +1588,13 @@ function patchSqlite3(dbModule, config) {
   return true;
 }
 function patchNodeSqlite(dbModule, config) {
+  const origEmit = process.emitWarning;
+  process.emitWarning = function(warning, ...args) {
+    if (typeof warning === "string" && warning.includes("SQLite is an experimental feature")) return;
+    return origEmit.call(process, warning, ...args);
+  };
   const mod = tryRequire("node:sqlite");
+  process.emitWarning = origEmit;
   if (!mod?.DatabaseSync?.prototype) return false;
   const dbProto = mod.DatabaseSync.prototype;
   const origPrepare = dbProto.prepare;
@@ -1753,14 +1851,14 @@ function redactValue(value, customFields = []) {
   if (value && typeof value === "object") {
     const out = {};
     for (const [key, child] of Object.entries(value)) {
-      out[key] = isSensitiveKey(key, customFields) ? "[REDACTED]" : redactValue(child, customFields);
+      out[key] = isSensitiveKey2(key, customFields) ? "[REDACTED]" : redactValue(child, customFields);
     }
     return out;
   }
   if (typeof value === "string") return redactText(value);
   return value;
 }
-function isSensitiveKey(key, customFields) {
+function isSensitiveKey2(key, customFields) {
   return /password|passcode|authorization|cookie|otp|token|jwt|secret|refresh|iban|national.?id|card/i.test(key) || customFields.some((field) => field.toLowerCase() === key.toLowerCase());
 }
 function redactText(value) {
@@ -1991,7 +2089,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "0.1.3";
+var SDK_VERSION = "0.2.3";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
@@ -2192,8 +2290,12 @@ var AllStakClient = class {
   getCurrentScope() {
     return this.scopeStack[this.scopeStack.length - 1] ?? null;
   }
-  addBreadcrumb(type, message, level, data) {
-    this.errors.addBreadcrumb(type, message, level, data);
+  addBreadcrumb(typeOrCrumb, message, level, data) {
+    if (typeof typeOrCrumb === "object") {
+      this.errors.addBreadcrumb(typeOrCrumb.type, typeOrCrumb.message, typeOrCrumb.level, typeOrCrumb.data);
+    } else {
+      this.errors.addBreadcrumb(typeOrCrumb, message, level, data);
+    }
   }
   clearBreadcrumbs() {
     this.errors.clearBreadcrumbs();
@@ -2209,12 +2311,13 @@ var AllStakClient = class {
    */
   captureMessage(message, level = "info", options = {}) {
     const as = options.as ?? (level === "fatal" || level === "error" ? "both" : "log");
+    const callerMeta = options.metadata ?? options.data;
     if (as === "log" || as === "both") {
       const logLevel = level === "warning" ? "warn" : level;
-      this.logs.send(logLevel, message);
+      this.logs.send(logLevel, message, callerMeta);
     }
     if (as === "error" || as === "both") {
-      this.withScopedConfig(() => this.errors.captureMessage(message, level));
+      this.withScopedConfig(() => this.errors.captureMessage(message, level, { metadata: callerMeta }));
     }
   }
   /**
@@ -2475,8 +2578,12 @@ var AllStak = {
   captureException(error, context) {
     ensureInit().captureException(error, context);
   },
-  addBreadcrumb(type, message, level, data) {
-    ensureInit().addBreadcrumb(type, message, level, data);
+  addBreadcrumb(typeOrCrumb, message, level, data) {
+    if (typeof typeOrCrumb === "object") {
+      ensureInit().addBreadcrumb(typeOrCrumb.type, typeOrCrumb.message, typeOrCrumb.level, typeOrCrumb.data);
+    } else {
+      ensureInit().addBreadcrumb(typeOrCrumb, message, level, data);
+    }
   },
   clearBreadcrumbs() {
     ensureInit().clearBreadcrumbs();

@@ -433,7 +433,13 @@ function patchSqlite3(dbModule, config) {
   return true;
 }
 function patchNodeSqlite(dbModule, config) {
+  const origEmit = process.emitWarning;
+  process.emitWarning = function(warning, ...args) {
+    if (typeof warning === "string" && warning.includes("SQLite is an experimental feature")) return;
+    return origEmit.call(process, warning, ...args);
+  };
   const mod = tryRequire("node:sqlite");
+  process.emitWarning = origEmit;
   if (!mod?.DatabaseSync?.prototype) return false;
   const dbProto = mod.DatabaseSync.prototype;
   const origPrepare = dbProto.prepare;

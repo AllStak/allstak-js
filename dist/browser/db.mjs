@@ -7,7 +7,7 @@ import {
   markOwnedByOrm,
   normalizeQuery,
   safeCapture
-} from "./chunk-46REABUF.mjs";
+} from "./chunk-KENGFPTD.mjs";
 
 // src/integrations/db/prisma.ts
 function instrumentPrisma(prisma, dbModule, config = {}) {
