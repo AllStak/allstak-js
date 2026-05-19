@@ -3,7 +3,7 @@
  *
  * Same default deny-list and shape as the redactors shipped in
  *   - allstak/sdk-php (Privacy\Sanitizer)
- *   - github.com/allstak-io/allstak-go (Redactor)
+ *   - github.com/AllStak/allstak-go (Redactor)
  *   - @allstak/nestjs (src/redaction.ts)
  *   - @allstak/fastify (src/redaction.ts)
  *   - @allstak/otel (src/redaction.ts)
