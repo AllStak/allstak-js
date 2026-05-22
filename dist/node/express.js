@@ -421,8 +421,105 @@ function browserRequestContext() {
     method: "GET",
     path: location.pathname || "/",
     host: location.host || "",
+    query: location.search || void 0,
     userAgent: typeof navigator !== "undefined" ? navigator.userAgent : void 0
   };
+}
+function runtimeMetadata(platform) {
+  const out = {
+    "runtime.platform": platform
+  };
+  if (typeof process !== "undefined" && process.versions?.node) {
+    out["runtime.name"] = "node";
+    out["runtime.version"] = process.versions.node;
+    out["node.version"] = process.version;
+    out["node.arch"] = process.arch;
+    out["os.name"] = process.platform;
+    out["os.arch"] = process.arch;
+    if (typeof process.pid === "number") out["process.pid"] = process.pid;
+    if (typeof process.title === "string" && process.title) out["process.title"] = process.title;
+  } else if (typeof navigator !== "undefined") {
+    out["runtime.name"] = "browser";
+    out["browser.userAgent"] = navigator.userAgent;
+    out["browser.language"] = navigator.language;
+    if (typeof navigator.platform === "string" && navigator.platform) out["os.name"] = navigator.platform;
+  }
+  if (typeof window !== "undefined" && typeof location !== "undefined") {
+    out["url"] = location.href;
+    out["request.url"] = location.href;
+  }
+  return out;
+}
+function requestContextFromContext(context) {
+  const raw = context?.requestContext;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const r = raw;
+    return compactRequestContext({
+      method: stringValue(r.method),
+      path: stringValue(r.path),
+      host: stringValue(r.host),
+      route: stringValue(r.route),
+      query: stringValue(r.query),
+      statusCode: numberValue(r.statusCode),
+      durationMs: numberValue(r.durationMs),
+      userAgent: stringValue(r.userAgent)
+    });
+  }
+  return compactRequestContext({
+    method: stringValue(context?.["request.method"] ?? context?.httpMethod),
+    path: stringValue(context?.["request.path"] ?? context?.httpPath),
+    host: stringValue(context?.["request.host"] ?? context?.httpHost),
+    route: stringValue(context?.["request.route"] ?? context?.httpRoute),
+    query: stringValue(context?.["request.query"] ?? context?.httpQuery),
+    statusCode: numberValue(context?.["request.status_code"] ?? context?.statusCode),
+    durationMs: numberValue(context?.["request.duration_ms"] ?? context?.durationMs),
+    userAgent: stringValue(context?.["request.userAgent"] ?? context?.userAgent)
+  });
+}
+function compactRequestContext(ctx) {
+  const out = {};
+  for (const [key, value] of Object.entries(ctx)) {
+    if (value !== void 0 && value !== "") out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : void 0;
+}
+function requestMetadata(ctx) {
+  if (!ctx) return {};
+  const out = {};
+  if (ctx.method) {
+    out["request.method"] = ctx.method;
+    out["http.method"] = ctx.method;
+  }
+  if (ctx.path) {
+    out["request.path"] = ctx.path;
+    out["http.path"] = ctx.path;
+  }
+  if (ctx.host) {
+    out["request.host"] = ctx.host;
+    out["http.host"] = ctx.host;
+  }
+  if (ctx.route) out["request.route"] = ctx.route;
+  if (ctx.query) out["request.query"] = ctx.query;
+  if (ctx.statusCode !== void 0) {
+    out["request.status_code"] = ctx.statusCode;
+    out["http.status_code"] = ctx.statusCode;
+  }
+  if (ctx.durationMs !== void 0) out["request.duration_ms"] = ctx.durationMs;
+  if (ctx.userAgent) out["request.userAgent"] = ctx.userAgent;
+  return out;
+}
+function stringValue(value) {
+  if (typeof value !== "string") return void 0;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : void 0;
+}
+function numberValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return void 0;
 }
 var INGEST_PATH = "/ingest/v1/errors";
 var VALID_BREADCRUMB_TYPES = /* @__PURE__ */ new Set(["http", "log", "ui", "navigation", "query", "default"]);
@@ -503,6 +600,8 @@ var ErrorModule = class {
     this.breadcrumbs = [];
     if (!this.passesSampleRate()) return;
     const exceptionClass = (error.name && error.name !== "Error" ? error.name : void 0) || error.constructor?.name || "Error";
+    const requestCtx = requestContextFromContext(context) ?? browserRequestContext();
+    const transaction = stringContext(context, "transaction") ?? requestCtx?.route ?? (requestCtx?.method && requestCtx?.path ? `${requestCtx.method} ${requestCtx.path}` : void 0);
     const payload = {
       exceptionClass,
       message: error.message,
@@ -524,10 +623,12 @@ var ErrorModule = class {
       replayId: stringContext(context, "replayId"),
       service: stringContext(context, "service"),
       user: this.config.user,
-      metadata: this.buildMetadata(context),
+      metadata: this.buildMetadata(context, platform, requestCtx),
       breadcrumbs: currentBreadcrumbs,
-      requestContext: browserRequestContext(),
-      fingerprint: this.config.fingerprint
+      requestContext: requestCtx,
+      fingerprint: this.config.fingerprint,
+      transaction,
+      tags: this.buildEventTags(platform, requestCtx, transaction)
     };
     this.sendThroughPipeline(payload);
   }
@@ -547,9 +648,10 @@ var ErrorModule = class {
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: this.buildMetadata(callerMeta),
+      metadata: this.buildMetadata(callerMeta, platform, browserRequestContext()),
       requestContext: browserRequestContext(),
-      fingerprint: this.config.fingerprint
+      fingerprint: this.config.fingerprint,
+      tags: this.buildEventTags(platform, browserRequestContext(), void 0)
     };
     this.sendThroughPipeline(payload);
   }
@@ -560,23 +662,51 @@ var ErrorModule = class {
     if (r <= 0) return false;
     return Math.random() < r;
   }
-  buildMetadata(perCallContext) {
+  buildMetadata(perCallContext, platform = this.config.platform || detectPlatform(), requestCtx) {
     const extraKeys = this.config.redactKeys;
     const safePerCall = redactObject(perCallContext, { extraKeys });
     const safeTags = redactObject(this.config.tags, { extraKeys });
     const safeExtras = redactObject(this.config.extras, { extraKeys });
     const out = {
       ...this.releaseTags(),
+      ...runtimeMetadata(platform),
+      ...requestMetadata(requestCtx),
       ...safeTags ?? {},
       ...safeExtras ?? {},
       ...safePerCall ?? {}
     };
+    delete out.requestContext;
+    delete out.transaction;
     const contexts = this.config.contexts;
     if (contexts) {
       for (const [name, ctx] of Object.entries(contexts)) {
         out[`context.${name}`] = ctx;
       }
     }
+    return out;
+  }
+  buildEventTags(platform, requestCtx, transaction) {
+    const out = {
+      "sdk.name": this.config.sdkName ?? SDK_NAME,
+      "sdk.version": this.config.sdkVersion ?? SDK_VERSION,
+      platform,
+      "runtime.platform": platform
+    };
+    if (typeof process !== "undefined" && process.versions?.node) {
+      out["runtime.name"] = "node";
+      out["runtime.version"] = process.versions.node;
+      out["os.name"] = process.platform;
+      out["os.arch"] = process.arch;
+    }
+    if (this.config.environment) out.environment = this.config.environment;
+    if (this.config.release) out.release = this.config.release;
+    if (this.config.dist) out.dist = this.config.dist;
+    if (requestCtx?.method) out["request.method"] = requestCtx.method;
+    if (requestCtx?.path) out["request.path"] = requestCtx.path;
+    if (requestCtx?.host) out["request.host"] = requestCtx.host;
+    if (requestCtx?.route) out["request.route"] = requestCtx.route;
+    if (requestCtx?.statusCode !== void 0) out["request.status_code"] = String(requestCtx.statusCode);
+    if (transaction) out.transaction = transaction;
     return out;
   }
   async sendThroughPipeline(payload) {
@@ -3176,6 +3306,21 @@ function hostOf(req) {
   if (typeof h === "string") return h;
   return "unknown";
 }
+function routeOf(req) {
+  const routePath = req.route?.path;
+  const route = Array.isArray(routePath) ? routePath.map(String).join("|") : routePath != null ? String(routePath) : void 0;
+  if (!route) return void 0;
+  return `${req.baseUrl ?? ""}${route}`;
+}
+function queryOf(req) {
+  const raw = req.originalUrl ?? req.url;
+  if (!raw) return void 0;
+  const qIdx = raw.indexOf("?");
+  return qIdx >= 0 ? raw.substring(qIdx) : void 0;
+}
+function userAgentOf(req) {
+  return firstHeader(req.headers["user-agent"]);
+}
 function userFromRequest(req) {
   const u = req.user;
   if (!u || typeof u !== "object") return null;
@@ -3202,6 +3347,7 @@ var allstakExpress = {
       const path = pathFromRequest(req);
       const method = methodOf(req);
       const host = hostOf(req);
+      const route = routeOf(req);
       const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
       sdk.withTraceContext(upstreamTrace, () => {
         let rootSpan = null;
@@ -3236,6 +3382,12 @@ var allstakExpress = {
             });
             if (rootSpan) {
               try {
+                if (route) {
+                  rootSpan.setTag?.(
+                    "http.route",
+                    route
+                  );
+                }
                 rootSpan.setTag?.(
                   "http.status_code",
                   String(res.statusCode)
@@ -3266,10 +3418,24 @@ var allstakExpress = {
           const u = userFromRequest(req);
           if (u) sdk.setUser(u);
           const e = err instanceof Error ? err : new Error(String(err));
+          const method = methodOf(req);
+          const path = pathFromRequest(req);
+          const host = hostOf(req);
+          const route = routeOf(req);
           AllStak.captureException(e, {
-            httpMethod: methodOf(req),
-            httpPath: pathFromRequest(req),
-            httpHost: hostOf(req)
+            transaction: route ? `${method} ${route}` : `${method} ${path}`,
+            requestContext: {
+              method,
+              path,
+              host,
+              route,
+              query: queryOf(req),
+              userAgent: userAgentOf(req)
+            },
+            "request.method": method,
+            "request.path": path,
+            "request.host": host,
+            ...route ? { "request.route": route } : {}
           });
         }
       } catch {

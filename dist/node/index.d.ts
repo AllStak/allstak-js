@@ -27,7 +27,10 @@ interface ErrorRequestContext {
     method?: string;
     path?: string;
     host?: string;
+    route?: string;
+    query?: string;
     statusCode?: number;
+    durationMs?: number;
     userAgent?: string;
 }
 /**
@@ -82,6 +85,8 @@ interface ErrorIngestPayload {
     breadcrumbs?: Breadcrumb[];
     requestContext?: ErrorRequestContext;
     fingerprint?: string[];
+    transaction?: string;
+    tags?: Record<string, string>;
 }
 type EventFilterPattern = string | RegExp;
 type ErrorEventProcessor = (event: ErrorIngestPayload) => ErrorIngestPayload | null | undefined | Promise<ErrorIngestPayload | null | undefined>;

@@ -28,6 +28,10 @@ interface ExpressRequest {
     originalUrl?: string;
     url?: string;
     path?: string;
+    route?: {
+        path?: string | RegExp | Array<string | RegExp>;
+    };
+    baseUrl?: string;
     hostname?: string;
     headers: Record<string, string | string[] | undefined>;
     ip?: string;

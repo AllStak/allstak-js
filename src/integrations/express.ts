@@ -35,6 +35,8 @@ interface ExpressRequest {
   originalUrl?: string;
   url?: string;
   path?: string;
+  route?: { path?: string | RegExp | Array<string | RegExp> };
+  baseUrl?: string;
   hostname?: string;
   headers: Record<string, string | string[] | undefined>;
   ip?: string;
@@ -71,6 +73,28 @@ function hostOf(req: ExpressRequest): string {
   return 'unknown';
 }
 
+function routeOf(req: ExpressRequest): string | undefined {
+  const routePath = req.route?.path;
+  const route = Array.isArray(routePath)
+    ? routePath.map(String).join('|')
+    : routePath != null
+      ? String(routePath)
+      : undefined;
+  if (!route) return undefined;
+  return `${req.baseUrl ?? ''}${route}`;
+}
+
+function queryOf(req: ExpressRequest): string | undefined {
+  const raw = req.originalUrl ?? req.url;
+  if (!raw) return undefined;
+  const qIdx = raw.indexOf('?');
+  return qIdx >= 0 ? raw.substring(qIdx) : undefined;
+}
+
+function userAgentOf(req: ExpressRequest): string | undefined {
+  return firstHeader(req.headers['user-agent']);
+}
+
 function userFromRequest(req: ExpressRequest): { id?: string; email?: string } | null {
   const u = req.user;
   if (!u || typeof u !== 'object') return null;
@@ -99,6 +123,7 @@ export const allstakExpress = {
       const path = pathFromRequest(req);
       const method = methodOf(req);
       const host = hostOf(req);
+      const route = routeOf(req);
 
       // Honor upstream W3C traceparent or AllStak trace headers if present.
       const upstreamTrace = firstHeader(req.headers['x-allstak-trace-id'])
@@ -143,6 +168,12 @@ export const allstakExpress = {
 
             if (rootSpan) {
               try {
+                if (route) {
+                  (rootSpan as unknown as { setTag?: (k: string, v: string) => void }).setTag?.(
+                    'http.route',
+                    route,
+                  );
+                }
                 (rootSpan as unknown as { setTag?: (k: string, v: string) => void }).setTag?.(
                   'http.status_code',
                   String(res.statusCode),
@@ -182,10 +213,24 @@ export const allstakExpress = {
           const u = userFromRequest(req);
           if (u) sdk.setUser(u);
           const e = err instanceof Error ? err : new Error(String(err));
+          const method = methodOf(req);
+          const path = pathFromRequest(req);
+          const host = hostOf(req);
+          const route = routeOf(req);
           AllStak.captureException(e, {
-            httpMethod: methodOf(req),
-            httpPath: pathFromRequest(req),
-            httpHost: hostOf(req),
+            transaction: route ? `${method} ${route}` : `${method} ${path}`,
+            requestContext: {
+              method,
+              path,
+              host,
+              route,
+              query: queryOf(req),
+              userAgent: userAgentOf(req),
+            },
+            'request.method': method,
+            'request.path': path,
+            'request.host': host,
+            ...(route ? { 'request.route': route } : {}),
           });
         }
       } catch {

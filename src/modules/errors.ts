@@ -31,7 +31,10 @@ interface ErrorRequestContext {
   method?: string;
   path?: string;
   host?: string;
+  route?: string;
+  query?: string;
   statusCode?: number;
+  durationMs?: number;
   userAgent?: string;
 }
 
@@ -84,6 +87,8 @@ export interface ErrorIngestPayload {
   breadcrumbs?: Breadcrumb[];
   requestContext?: ErrorRequestContext;
   fingerprint?: string[];
+  transaction?: string;
+  tags?: Record<string, string>;
 }
 
 export type EventFilterPattern = string | RegExp;
@@ -120,8 +125,115 @@ function browserRequestContext(): ErrorRequestContext | undefined {
     method: 'GET',
     path: location.pathname || '/',
     host: location.host || '',
+    query: location.search || undefined,
     userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
   };
+}
+
+function runtimeMetadata(platform: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    'runtime.platform': platform,
+  };
+
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    out['runtime.name'] = 'node';
+    out['runtime.version'] = process.versions.node;
+    out['node.version'] = process.version;
+    out['node.arch'] = process.arch;
+    out['os.name'] = process.platform;
+    out['os.arch'] = process.arch;
+    if (typeof process.pid === 'number') out['process.pid'] = process.pid;
+    if (typeof process.title === 'string' && process.title) out['process.title'] = process.title;
+  } else if (typeof navigator !== 'undefined') {
+    out['runtime.name'] = 'browser';
+    out['browser.userAgent'] = navigator.userAgent;
+    out['browser.language'] = navigator.language;
+    if (typeof navigator.platform === 'string' && navigator.platform) out['os.name'] = navigator.platform;
+  }
+
+  if (typeof window !== 'undefined' && typeof location !== 'undefined') {
+    out['url'] = location.href;
+    out['request.url'] = location.href;
+  }
+
+  return out;
+}
+
+function requestContextFromContext(context?: Record<string, unknown>): ErrorRequestContext | undefined {
+  const raw = context?.requestContext;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const r = raw as Record<string, unknown>;
+    return compactRequestContext({
+      method: stringValue(r.method),
+      path: stringValue(r.path),
+      host: stringValue(r.host),
+      route: stringValue(r.route),
+      query: stringValue(r.query),
+      statusCode: numberValue(r.statusCode),
+      durationMs: numberValue(r.durationMs),
+      userAgent: stringValue(r.userAgent),
+    });
+  }
+
+  return compactRequestContext({
+    method: stringValue(context?.['request.method'] ?? context?.httpMethod),
+    path: stringValue(context?.['request.path'] ?? context?.httpPath),
+    host: stringValue(context?.['request.host'] ?? context?.httpHost),
+    route: stringValue(context?.['request.route'] ?? context?.httpRoute),
+    query: stringValue(context?.['request.query'] ?? context?.httpQuery),
+    statusCode: numberValue(context?.['request.status_code'] ?? context?.statusCode),
+    durationMs: numberValue(context?.['request.duration_ms'] ?? context?.durationMs),
+    userAgent: stringValue(context?.['request.userAgent'] ?? context?.userAgent),
+  });
+}
+
+function compactRequestContext(ctx: ErrorRequestContext): ErrorRequestContext | undefined {
+  const out: ErrorRequestContext = {};
+  for (const [key, value] of Object.entries(ctx) as Array<[keyof ErrorRequestContext, string | number | undefined]>) {
+    if (value !== undefined && value !== '') (out as any)[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function requestMetadata(ctx?: ErrorRequestContext): Record<string, unknown> {
+  if (!ctx) return {};
+  const out: Record<string, unknown> = {};
+  if (ctx.method) {
+    out['request.method'] = ctx.method;
+    out['http.method'] = ctx.method;
+  }
+  if (ctx.path) {
+    out['request.path'] = ctx.path;
+    out['http.path'] = ctx.path;
+  }
+  if (ctx.host) {
+    out['request.host'] = ctx.host;
+    out['http.host'] = ctx.host;
+  }
+  if (ctx.route) out['request.route'] = ctx.route;
+  if (ctx.query) out['request.query'] = ctx.query;
+  if (ctx.statusCode !== undefined) {
+    out['request.status_code'] = ctx.statusCode;
+    out['http.status_code'] = ctx.statusCode;
+  }
+  if (ctx.durationMs !== undefined) out['request.duration_ms'] = ctx.durationMs;
+  if (ctx.userAgent) out['request.userAgent'] = ctx.userAgent;
+  return out;
+}
+
+function stringValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
 }
 
 const INGEST_PATH = '/ingest/v1/errors';
@@ -244,6 +356,10 @@ export class ErrorModule {
       error.constructor?.name ||
       'Error';
 
+    const requestCtx = requestContextFromContext(context) ?? browserRequestContext();
+    const transaction = stringContext(context, 'transaction')
+      ?? requestCtx?.route
+      ?? (requestCtx?.method && requestCtx?.path ? `${requestCtx.method} ${requestCtx.path}` : undefined);
     const payload: any = {
       exceptionClass,
       message: error.message,
@@ -265,10 +381,12 @@ export class ErrorModule {
       replayId: stringContext(context, 'replayId'),
       service: stringContext(context, 'service'),
       user: this.config.user,
-      metadata: this.buildMetadata(context),
+      metadata: this.buildMetadata(context, platform, requestCtx),
       breadcrumbs: currentBreadcrumbs,
-      requestContext: browserRequestContext(),
+      requestContext: requestCtx,
       fingerprint: this.config.fingerprint,
+      transaction,
+      tags: this.buildEventTags(platform, requestCtx, transaction),
     };
 
     this.sendThroughPipeline(payload);
@@ -297,9 +415,10 @@ export class ErrorModule {
       release: this.config.release,
       sessionId: this.sessionId,
       user: this.config.user,
-      metadata: this.buildMetadata(callerMeta),
+      metadata: this.buildMetadata(callerMeta, platform, browserRequestContext()),
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint,
+      tags: this.buildEventTags(platform, browserRequestContext(), undefined),
     };
 
     this.sendThroughPipeline(payload);
@@ -314,7 +433,11 @@ export class ErrorModule {
     return Math.random() < r;
   }
 
-  private buildMetadata(perCallContext?: Record<string, unknown>): Record<string, unknown> {
+  private buildMetadata(
+    perCallContext?: Record<string, unknown>,
+    platform = this.config.platform || detectPlatform(),
+    requestCtx?: ErrorRequestContext,
+  ): Record<string, unknown> {
     // Redact caller-owned inputs (per-call context, configured tags/extras)
     // BEFORE merging so the assembled metadata is safe by construction.
     // Release tags are SDK-owned and not subject to redaction.
@@ -324,16 +447,49 @@ export class ErrorModule {
     const safeExtras = redactObject((this.config as any).extras as Record<string, unknown> | undefined, { extraKeys });
     const out: Record<string, unknown> = {
       ...this.releaseTags(),
+      ...runtimeMetadata(platform),
+      ...requestMetadata(requestCtx),
       ...(safeTags ?? {}),
       ...(safeExtras ?? {}),
       ...(safePerCall ?? {}),
     };
+    delete out.requestContext;
+    delete out.transaction;
     const contexts = (this.config as any).contexts as Record<string, Record<string, unknown>> | undefined;
     if (contexts) {
       for (const [name, ctx] of Object.entries(contexts)) {
         out[`context.${name}`] = ctx;
       }
     }
+    return out;
+  }
+
+  private buildEventTags(
+    platform: string,
+    requestCtx?: ErrorRequestContext,
+    transaction?: string,
+  ): Record<string, string> {
+    const out: Record<string, string> = {
+      'sdk.name': this.config.sdkName ?? SDK_NAME,
+      'sdk.version': this.config.sdkVersion ?? SDK_VERSION,
+      platform,
+      'runtime.platform': platform,
+    };
+    if (typeof process !== 'undefined' && process.versions?.node) {
+      out['runtime.name'] = 'node';
+      out['runtime.version'] = process.versions.node;
+      out['os.name'] = process.platform;
+      out['os.arch'] = process.arch;
+    }
+    if (this.config.environment) out.environment = this.config.environment;
+    if (this.config.release) out.release = this.config.release;
+    if (this.config.dist) out.dist = this.config.dist;
+    if (requestCtx?.method) out['request.method'] = requestCtx.method;
+    if (requestCtx?.path) out['request.path'] = requestCtx.path;
+    if (requestCtx?.host) out['request.host'] = requestCtx.host;
+    if (requestCtx?.route) out['request.route'] = requestCtx.route;
+    if (requestCtx?.statusCode !== undefined) out['request.status_code'] = String(requestCtx.statusCode);
+    if (transaction) out.transaction = transaction;
     return out;
   }
 
