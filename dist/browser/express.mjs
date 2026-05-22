@@ -1,6 +1,6 @@
 import {
   AllStak
-} from "./chunk-N4QD4XXJ.mjs";
+} from "./chunk-Q7N3HE44.mjs";
 import "./chunk-KENGFPTD.mjs";
 
 // src/integrations/express.ts

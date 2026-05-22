@@ -164,7 +164,7 @@ describe('Error Module', () => {
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.transaction).toBe('GET /orders/:id');
+    expect(body.transaction).toBeUndefined();
     expect(body.requestContext).toMatchObject({
       method: 'GET',
       path: '/orders/42',
@@ -174,18 +174,11 @@ describe('Error Module', () => {
       durationMs: 37,
       userAgent: 'vitest-agent',
     });
-    expect(body.tags).toMatchObject({
+    expect(body.tags).toBeUndefined();
+    expect(body.metadata).toMatchObject({
       'sdk.name': 'allstak-js',
       'sdk.version': expect.any(String),
       platform: expect.any(String),
-      'request.method': 'GET',
-      'request.path': '/orders/42',
-      'request.host': 'api.example.test',
-      'request.route': '/orders/:id',
-      'request.status_code': '500',
-      transaction: 'GET /orders/:id',
-    });
-    expect(body.metadata).toMatchObject({
       'runtime.platform': expect.any(String),
       'request.method': 'GET',
       'request.path': '/orders/42',
@@ -194,6 +187,7 @@ describe('Error Module', () => {
       'request.status_code': 500,
       'request.duration_ms': 37,
       'request.userAgent': 'vitest-agent',
+      transaction: 'GET /orders/:id',
     });
     expect(body.metadata.requestContext).toBeUndefined();
   });

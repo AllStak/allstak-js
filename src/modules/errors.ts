@@ -87,8 +87,6 @@ export interface ErrorIngestPayload {
   breadcrumbs?: Breadcrumb[];
   requestContext?: ErrorRequestContext;
   fingerprint?: string[];
-  transaction?: string;
-  tags?: Record<string, string>;
 }
 
 export type EventFilterPattern = string | RegExp;
@@ -324,7 +322,7 @@ export class ErrorModule {
     }));
 
     // Aggregate unique debug-ids into the per-event debugMeta.images[]
-    // table. Sentry-compatible shape; the symbolicator can match by
+    // table. AllStak-compatible shape; the symbolicator can match by
     // image-level debugId even when individual frames lack one.
     const debugIdSet = new Set<string>();
     for (const f of frames) if (f.debugId) debugIdSet.add(f.debugId);
@@ -381,12 +379,10 @@ export class ErrorModule {
       replayId: stringContext(context, 'replayId'),
       service: stringContext(context, 'service'),
       user: this.config.user,
-      metadata: this.buildMetadata(context, platform, requestCtx),
+      metadata: this.buildMetadata(context, platform, requestCtx, transaction),
       breadcrumbs: currentBreadcrumbs,
       requestContext: requestCtx,
       fingerprint: this.config.fingerprint,
-      transaction,
-      tags: this.buildEventTags(platform, requestCtx, transaction),
     };
 
     this.sendThroughPipeline(payload);
@@ -418,7 +414,6 @@ export class ErrorModule {
       metadata: this.buildMetadata(callerMeta, platform, browserRequestContext()),
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint,
-      tags: this.buildEventTags(platform, browserRequestContext(), undefined),
     };
 
     this.sendThroughPipeline(payload);
@@ -437,6 +432,7 @@ export class ErrorModule {
     perCallContext?: Record<string, unknown>,
     platform = this.config.platform || detectPlatform(),
     requestCtx?: ErrorRequestContext,
+    transaction?: string,
   ): Record<string, unknown> {
     // Redact caller-owned inputs (per-call context, configured tags/extras)
     // BEFORE merging so the assembled metadata is safe by construction.
@@ -454,42 +450,13 @@ export class ErrorModule {
       ...(safePerCall ?? {}),
     };
     delete out.requestContext;
-    delete out.transaction;
+    if (transaction) out.transaction = transaction;
     const contexts = (this.config as any).contexts as Record<string, Record<string, unknown>> | undefined;
     if (contexts) {
       for (const [name, ctx] of Object.entries(contexts)) {
         out[`context.${name}`] = ctx;
       }
     }
-    return out;
-  }
-
-  private buildEventTags(
-    platform: string,
-    requestCtx?: ErrorRequestContext,
-    transaction?: string,
-  ): Record<string, string> {
-    const out: Record<string, string> = {
-      'sdk.name': this.config.sdkName ?? SDK_NAME,
-      'sdk.version': this.config.sdkVersion ?? SDK_VERSION,
-      platform,
-      'runtime.platform': platform,
-    };
-    if (typeof process !== 'undefined' && process.versions?.node) {
-      out['runtime.name'] = 'node';
-      out['runtime.version'] = process.versions.node;
-      out['os.name'] = process.platform;
-      out['os.arch'] = process.arch;
-    }
-    if (this.config.environment) out.environment = this.config.environment;
-    if (this.config.release) out.release = this.config.release;
-    if (this.config.dist) out.dist = this.config.dist;
-    if (requestCtx?.method) out['request.method'] = requestCtx.method;
-    if (requestCtx?.path) out['request.path'] = requestCtx.path;
-    if (requestCtx?.host) out['request.host'] = requestCtx.host;
-    if (requestCtx?.route) out['request.route'] = requestCtx.route;
-    if (requestCtx?.statusCode !== undefined) out['request.status_code'] = String(requestCtx.statusCode);
-    if (transaction) out.transaction = transaction;
     return out;
   }
 

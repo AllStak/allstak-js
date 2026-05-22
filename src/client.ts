@@ -118,7 +118,7 @@ export interface AllStakConfig extends ReleaseMetadata {
    */
   beforeSend?: (event: any) => any | null | undefined | Promise<any | null | undefined>;
   /**
-   * Sentry-style event processors. Each processor can mutate an error event or
+   * AllStak-style event processors. Each processor can mutate an error event or
    * return null to drop it before `beforeSend`.
    */
   eventProcessors?: ErrorEventProcessor[];
@@ -678,7 +678,7 @@ export class AllStakClient {
   }
 
   /**
-   * Sentry-style helper: creates a span, runs the callback, then finishes the
+   * AllStak-style helper: creates a span, runs the callback, then finishes the
    * span automatically. Async callbacks are supported, and thrown/rejected
    * errors mark the span as failed before being rethrown.
    */

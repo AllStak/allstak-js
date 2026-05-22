@@ -1,5 +1,5 @@
 /**
- * Sentry-parity API tests for @allstak/js v0.1.4:
+ * AllStak parity API tests for @allstak/js v0.1.4:
  *   - beforeSend (mutate, drop, async, error-safe)
  *   - sampleRate
  *   - setTags / setExtra / setExtras / setContext
@@ -323,7 +323,7 @@ describe('flush()', () => {
   });
 });
 
-describe('Sentry-style tracing parity', () => {
+describe('AllStak-style tracing parity', () => {
   it('trace() finishes sync spans automatically', async () => {
     AllStak.init({ apiKey: 'k', autoBreadcrumbs: false, autoNodeErrorCapture: false, autoDbInstrumentation: false });
 

@@ -1,10 +1,14 @@
+import { createRequire as __allstakCreateRequire } from 'node:module';
+const require = __allstakCreateRequire(import.meta.url);
 import {
-  __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-KENGFPTD.mjs";
+} from "./chunk-2Z2PH3DC.mjs";
+import {
+  __require
+} from "./chunk-6GVGKK5H.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -604,12 +608,10 @@ var ErrorModule = class {
       replayId: stringContext(context, "replayId"),
       service: stringContext(context, "service"),
       user: this.config.user,
-      metadata: this.buildMetadata(context, platform, requestCtx),
+      metadata: this.buildMetadata(context, platform, requestCtx, transaction),
       breadcrumbs: currentBreadcrumbs,
       requestContext: requestCtx,
-      fingerprint: this.config.fingerprint,
-      transaction,
-      tags: this.buildEventTags(platform, requestCtx, transaction)
+      fingerprint: this.config.fingerprint
     };
     this.sendThroughPipeline(payload);
   }
@@ -631,8 +633,7 @@ var ErrorModule = class {
       user: this.config.user,
       metadata: this.buildMetadata(callerMeta, platform, browserRequestContext()),
       requestContext: browserRequestContext(),
-      fingerprint: this.config.fingerprint,
-      tags: this.buildEventTags(platform, browserRequestContext(), void 0)
+      fingerprint: this.config.fingerprint
     };
     this.sendThroughPipeline(payload);
   }
@@ -643,7 +644,7 @@ var ErrorModule = class {
     if (r <= 0) return false;
     return Math.random() < r;
   }
-  buildMetadata(perCallContext, platform = this.config.platform || detectPlatform(), requestCtx) {
+  buildMetadata(perCallContext, platform = this.config.platform || detectPlatform(), requestCtx, transaction) {
     const extraKeys = this.config.redactKeys;
     const safePerCall = redactObject(perCallContext, { extraKeys });
     const safeTags = redactObject(this.config.tags, { extraKeys });
@@ -657,37 +658,13 @@ var ErrorModule = class {
       ...safePerCall ?? {}
     };
     delete out.requestContext;
-    delete out.transaction;
+    if (transaction) out.transaction = transaction;
     const contexts = this.config.contexts;
     if (contexts) {
       for (const [name, ctx] of Object.entries(contexts)) {
         out[`context.${name}`] = ctx;
       }
     }
-    return out;
-  }
-  buildEventTags(platform, requestCtx, transaction) {
-    const out = {
-      "sdk.name": this.config.sdkName ?? SDK_NAME,
-      "sdk.version": this.config.sdkVersion ?? SDK_VERSION,
-      platform,
-      "runtime.platform": platform
-    };
-    if (typeof process !== "undefined" && process.versions?.node) {
-      out["runtime.name"] = "node";
-      out["runtime.version"] = process.versions.node;
-      out["os.name"] = process.platform;
-      out["os.arch"] = process.arch;
-    }
-    if (this.config.environment) out.environment = this.config.environment;
-    if (this.config.release) out.release = this.config.release;
-    if (this.config.dist) out.dist = this.config.dist;
-    if (requestCtx?.method) out["request.method"] = requestCtx.method;
-    if (requestCtx?.path) out["request.path"] = requestCtx.path;
-    if (requestCtx?.host) out["request.host"] = requestCtx.host;
-    if (requestCtx?.route) out["request.route"] = requestCtx.route;
-    if (requestCtx?.statusCode !== void 0) out["request.status_code"] = String(requestCtx.statusCode);
-    if (transaction) out.transaction = transaction;
     return out;
   }
   async sendThroughPipeline(payload) {
@@ -1388,7 +1365,7 @@ var TracingModule = class {
   }
 };
 function createAsyncTraceStorage() {
-  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined") return null;
+  if (false) return null;
   try {
     const req = typeof __require === "function" ? __require : void 0;
     const AsyncLocalStorage = req?.("node:async_hooks").AsyncLocalStorage;
@@ -2204,7 +2181,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
+    return true;
   }
   isNodeRuntime() {
     return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
@@ -2484,7 +2461,7 @@ var AllStakClient = class {
     return this.tracing.startSpan(operation, options);
   }
   /**
-   * Sentry-style helper: creates a span, runs the callback, then finishes the
+   * AllStak-style helper: creates a span, runs the callback, then finishes the
    * span automatically. Async callbacks are supported, and thrown/rejected
    * errors mark the span as failed before being rethrown.
    */
@@ -2825,8 +2802,7 @@ export {
   inboundFiltersIntegration,
   httpClientIntegration,
   Scope,
-  SDK_VERSION,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-N4QD4XXJ.mjs.map
+//# sourceMappingURL=chunk-KY6JWYQG.mjs.map
