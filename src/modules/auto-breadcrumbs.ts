@@ -339,16 +339,24 @@ function mergeAllStakBaggage(headers: Headers, baggage: string): void {
   const allstakBaggage = headers.get('allstak-baggage');
   if (!allstakBaggage) {
     headers.set('allstak-baggage', baggage);
-  } else if (!allstakBaggage.includes('allstak-trace_id=')) {
-    headers.set('allstak-baggage', `${allstakBaggage},${baggage}`);
+  } else {
+    headers.set('allstak-baggage', mergeBaggageValue(allstakBaggage, baggage));
   }
 
   const standardBaggage = headers.get('baggage');
   if (!standardBaggage) {
     headers.set('baggage', baggage);
-  } else if (!standardBaggage.includes('allstak-trace_id=')) {
-    headers.set('baggage', `${standardBaggage},${baggage}`);
+  } else {
+    headers.set('baggage', mergeBaggageValue(standardBaggage, baggage));
   }
+}
+
+function mergeBaggageValue(existing: string, baggage: string): string {
+  const preserved = existing
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part && !part.toLowerCase().startsWith('allstak-'));
+  return [...preserved, ...baggage.split(',')].join(',');
 }
 
 function normalizeTraceId(traceId: string): string {

@@ -388,8 +388,11 @@ export class TracingModule {
 }
 
 function createAsyncTraceStorage(): AsyncTraceStorage | null {
-  if (typeof globalThis.__ALLSTAK_NODE__ === 'undefined') return null;
+  const proc = (globalThis as any).process;
+  if (typeof globalThis.__ALLSTAK_NODE__ === 'undefined' && !proc?.versions?.node) return null;
   try {
+    const fromProcess = proc?.getBuiltinModule?.('node:async_hooks')?.AsyncLocalStorage;
+    if (fromProcess) return new fromProcess();
     const req = typeof require === 'function' ? require : undefined;
     const AsyncLocalStorage = req?.('node:async_hooks').AsyncLocalStorage;
     return AsyncLocalStorage ? new AsyncLocalStorage() : null;

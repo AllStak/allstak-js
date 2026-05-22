@@ -116,4 +116,59 @@ describe('withScope isolation', () => {
     await wait(60);
     expect(JSON.parse(sent[0].init.body).metadata.bad).toBeUndefined();
   });
+
+  it('isolates overlapping async scopes in Node request contexts', async () => {
+    const previousNodeFlag = globalThis.__ALLSTAK_NODE__;
+    globalThis.__ALLSTAK_NODE__ = true;
+    try {
+      AllStak.init({ apiKey: 'k', ...cfg });
+
+      const run = (tenant: string, delay: number) =>
+        AllStak.withScope(async (scope) => {
+          scope.setTag('tenant', tenant);
+          await wait(delay);
+          AllStak.captureException(new Error(`tenant-${tenant}`));
+        });
+
+      await Promise.all([
+        run('a', 25),
+        run('b', 5),
+      ]);
+      await wait(80);
+
+      const bodies = sent.map((entry) => JSON.parse(entry.init.body));
+      const byMessage = Object.fromEntries(bodies.map((body) => [body.message, body]));
+      expect(byMessage['tenant-a'].metadata.tenant).toBe('a');
+      expect(byMessage['tenant-b'].metadata.tenant).toBe('b');
+    } finally {
+      globalThis.__ALLSTAK_NODE__ = previousNodeFlag;
+    }
+  });
+
+  it('configureScope mutates active scope or global defaults', async () => {
+    AllStak.init({ apiKey: 'k', ...cfg });
+
+    AllStak.configureScope((scope) => {
+      scope.setTag('global', 'yes');
+    });
+    AllStak.withScope((scope) => {
+      scope.setTag('local', 'yes');
+      AllStak.configureScope((current) => {
+        expect(current).toBe(scope);
+        current.setTag('configured', 'active');
+      });
+      AllStak.captureException(new Error('inside-configure'));
+    });
+    AllStak.captureException(new Error('outside-configure'));
+    await wait(80);
+
+    const inside = JSON.parse(sent[0].init.body).metadata;
+    const outside = JSON.parse(sent[1].init.body).metadata;
+    expect(inside.global).toBe('yes');
+    expect(inside.local).toBe('yes');
+    expect(inside.configured).toBe('active');
+    expect(outside.global).toBe('yes');
+    expect(outside.local).toBeUndefined();
+    expect(outside.configured).toBeUndefined();
+  });
 });

@@ -27,7 +27,7 @@ import { getDefaultIntegrations } from './integrations/defaults';
 export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
-export const SDK_VERSION = '0.2.3';
+export const SDK_VERSION = '0.2.4';
 /** SDK package name. Sent on the wire as `sdk.name`. */
 export const SDK_NAME = 'allstak-js';
 
@@ -270,6 +270,13 @@ function resolveTransport(config: AllStakConfig): ParsedConfig {
 import { Scope, mergeScopes } from './scope';
 export { Scope } from './scope';
 
+interface AsyncScopeStorage {
+  getStore(): Scope[] | undefined;
+  run<T>(store: Scope[], callback: () => T): T;
+}
+
+declare const require: undefined | ((id: string) => { AsyncLocalStorage?: new () => AsyncScopeStorage });
+
 export class AllStakClient {
   private transport: HttpTransport;
   private config: AllStakConfig;
@@ -283,7 +290,8 @@ export class AllStakClient {
   private integrations: IntegrationIndex = {};
   private sessionReplay: SessionReplayModule | null = null;
   private sessionId: string;
-  private scopeStack: Scope[] = [];
+  private globalScopeStack: Scope[] = [];
+  private asyncScopeStorage: AsyncScopeStorage | null = createAsyncScopeStorage();
 
   constructor(config: AllStakConfig) {
     applyReleaseAutodetect(config);
@@ -376,8 +384,9 @@ export class AllStakClient {
   }
 
   private withScopedConfig<T>(work: () => T): T {
-    if (this.scopeStack.length === 0) return work();
-    const eff = mergeScopes(this.config, this.scopeStack);
+    const stack = this.scopeStack();
+    if (stack.length === 0) return work();
+    const eff = mergeScopes(this.config, stack);
     const snap = {
       user: this.config.user,
       tags: this.config.tags,
@@ -403,11 +412,20 @@ export class AllStakClient {
     }
   }
 
+  private scopeStack(): Scope[] {
+    return this.asyncScopeStorage?.getStore() ?? this.globalScopeStack;
+  }
+
   withScope<T>(callback: (scope: Scope) => T): T {
     const scope = new Scope();
-    this.scopeStack.push(scope);
+    if (this.asyncScopeStorage) {
+      const parent = this.scopeStack();
+      return this.asyncScopeStorage.run([...parent, scope], () => callback(scope));
+    }
+
+    this.globalScopeStack.push(scope);
     let popped = false;
-    const pop = () => { if (!popped) { popped = true; this.scopeStack.pop(); } };
+    const pop = () => { if (!popped) { popped = true; this.globalScopeStack.pop(); } };
     try {
       const result = callback(scope);
       if (result && typeof (result as any).then === 'function') {
@@ -425,7 +443,25 @@ export class AllStakClient {
   }
 
   getCurrentScope(): Scope | null {
-    return this.scopeStack[this.scopeStack.length - 1] ?? null;
+    const stack = this.scopeStack();
+    return stack[stack.length - 1] ?? null;
+  }
+
+  configureScope(callback: (scope: Scope) => void): void {
+    const current = this.getCurrentScope();
+    if (current) {
+      callback(current);
+      return;
+    }
+    const scope = new Scope();
+    callback(scope);
+    const eff = mergeScopes(this.config, [scope]);
+    this.config.user = eff.user;
+    this.config.tags = eff.tags;
+    this.config.extras = eff.extras;
+    this.config.contexts = eff.contexts;
+    this.config.fingerprint = eff.fingerprint;
+    this.config.level = eff.level;
   }
 
   addBreadcrumb(
@@ -870,6 +906,20 @@ export class AllStakClient {
       process.off('unhandledRejection', this.nodeRejectionHandler);
       this.nodeRejectionHandler = null;
     }
+  }
+}
+
+function createAsyncScopeStorage(): AsyncScopeStorage | null {
+  const proc = (globalThis as any).process;
+  if (typeof globalThis.__ALLSTAK_NODE__ === 'undefined' && !proc?.versions?.node) return null;
+  try {
+    const fromProcess = proc?.getBuiltinModule?.('node:async_hooks')?.AsyncLocalStorage;
+    if (fromProcess) return new fromProcess();
+    const req = typeof require === 'function' ? require : undefined;
+    const AsyncLocalStorage = req?.('node:async_hooks').AsyncLocalStorage;
+    return AsyncLocalStorage ? new AsyncLocalStorage() : null;
+  } catch {
+    return null;
   }
 }
 

@@ -185,6 +185,14 @@ export const AllStak = {
     return ensureInit().withScope(callback);
   },
 
+  getCurrentScope(): Scope | null {
+    return ensureInit().getCurrentScope();
+  },
+
+  configureScope(callback: (scope: Scope) => void): void {
+    ensureInit().configureScope(callback);
+  },
+
   getSessionId(): string {
     return ensureInit().getSessionId();
   },
