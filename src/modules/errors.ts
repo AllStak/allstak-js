@@ -58,7 +58,7 @@ interface PayloadDebugImage {
   imageAddr?: string;
 }
 
-interface ErrorIngestPayload {
+export interface ErrorIngestPayload {
   exceptionClass: string;
   message: string;
   stackTrace?: string[];
@@ -85,6 +85,10 @@ interface ErrorIngestPayload {
   requestContext?: ErrorRequestContext;
   fingerprint?: string[];
 }
+
+export type EventFilterPattern = string | RegExp;
+export type ErrorEventProcessor =
+  (event: ErrorIngestPayload) => ErrorIngestPayload | null | undefined | Promise<ErrorIngestPayload | null | undefined>;
 
 /**
  * Detect the runtime so the SDK can stamp `platform` even when the
@@ -125,12 +129,12 @@ const INGEST_PATH = '/ingest/v1/errors';
 const VALID_BREADCRUMB_TYPES = new Set(['http', 'log', 'ui', 'navigation', 'query', 'default']);
 const VALID_BREADCRUMB_LEVELS = new Set(['info', 'warn', 'error', 'debug']);
 const DEFAULT_MAX_BREADCRUMBS = 50;
-
 export class ErrorModule {
   private onErrorHandler: ((event: ErrorEvent) => void) | null = null;
   private onUnhandledRejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
   private breadcrumbs: Breadcrumb[] = [];
   private maxBreadcrumbs: number;
+  private eventProcessors: ErrorEventProcessor[] = [];
 
   constructor(
     private transport: HttpTransport,
@@ -139,6 +143,10 @@ export class ErrorModule {
   ) {
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     this.setupAutocapture();
+  }
+
+  addEventProcessor(processor: ErrorEventProcessor): void {
+    this.eventProcessors.push(processor);
   }
 
   addBreadcrumb(
@@ -263,7 +271,7 @@ export class ErrorModule {
       fingerprint: this.config.fingerprint,
     };
 
-    this.sendThroughBeforeSend(payload);
+    this.sendThroughPipeline(payload);
   }
 
   captureMessage(
@@ -294,7 +302,7 @@ export class ErrorModule {
       fingerprint: this.config.fingerprint,
     };
 
-    this.sendThroughBeforeSend(payload);
+    this.sendThroughPipeline(payload);
   }
 
   // ── Filtering / control ─────────────────────────────────────────────
@@ -329,15 +337,33 @@ export class ErrorModule {
     return out;
   }
 
-  private async sendThroughBeforeSend(payload: any): Promise<void> {
-    let final: any = payload;
+  private async sendThroughPipeline(payload: ErrorIngestPayload): Promise<void> {
+    let final: ErrorIngestPayload | null | undefined = payload;
+
+    for (const processor of this.allEventProcessors()) {
+      if (!final) return;
+      try {
+        final = await processor(final);
+      } catch {
+        // Match the SDK's fail-open posture: a broken processor should not
+        // hide production telemetry.
+      }
+    }
+
+    if (!final) return;
+
     const beforeSend = (this.config as any).beforeSend;
     if (typeof beforeSend === 'function') {
-      try { final = await beforeSend(payload); }
-      catch { final = payload; /* never let a buggy hook drop telemetry */ }
+      try { final = await beforeSend(final); }
+      catch { /* keep processed event */ }
     }
     if (!final) return;
     this.transport.send(INGEST_PATH, final);
+  }
+
+  private allEventProcessors(): ErrorEventProcessor[] {
+    const configured = ((this.config as any).eventProcessors ?? []) as ErrorEventProcessor[];
+    return [...configured, ...this.eventProcessors];
   }
 
   private setupAutocapture(): void {

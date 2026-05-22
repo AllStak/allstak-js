@@ -4,8 +4,8 @@
  * Usage:
  * ```ts
  * import express from 'express';
- * import { AllStak } from 'allstak-js';
- * import { allstakExpress } from 'allstak-js/express';
+ * import { AllStak } from '@allstak/js';
+ * import { allstakExpress } from '@allstak/js/express';
  *
  * AllStak.init({ apiKey: 'ask_live_…', environment: 'production' });
  *

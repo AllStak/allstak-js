@@ -1,6 +1,6 @@
 import {
   AllStak
-} from "./chunk-A6UYKKVE.mjs";
+} from "./chunk-VE5WVMTJ.mjs";
 import "./chunk-KENGFPTD.mjs";
 
 // src/integrations/react.tsx

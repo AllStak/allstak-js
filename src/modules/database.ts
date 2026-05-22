@@ -38,6 +38,9 @@ export class DatabaseModule {
     private moduleConfig: { service?: string; environment?: string },
   ) {
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    if (typeof this.flushTimer === 'object' && typeof this.flushTimer.unref === 'function') {
+      this.flushTimer.unref();
+    }
   }
 
   /**
@@ -56,7 +59,7 @@ export class DatabaseModule {
     }
   }
 
-  private flush(): void {
+  flush(): void {
     if (this.queue.length === 0) return;
     const batch = this.queue.splice(0, this.queue.length);
     const payload: DbQueryIngestPayload = { queries: batch };

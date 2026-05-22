@@ -2,20 +2,29 @@ import { AllStakClient, AllStakConfig } from './client';
 import { Scope } from './scope';
 export { Scope } from './scope';
 import type { TransportStats } from './transport/http';
+import type { ErrorEventProcessor } from './modules/errors';
 import type { HttpRequestItem } from './modules/http-requests';
 import type { HeartbeatOptions } from './modules/cron';
-import type { Span } from './modules/tracing';
+import type { Span, SpanProcessor } from './modules/tracing';
 import type { DbQueryItem } from './modules/database';
 import type { DatabaseModule } from './modules/database';
+import type { AllStakIntegration } from './integration';
 
 export type { AllStakConfig, ScreenshotArtifact, ScreenshotCaptureOptions } from './client';
+export type { AllStakIntegration, IntegrationIndex, IntegrationOption } from './integration';
+export { defineIntegration } from './integration';
+export { eventFiltersIntegration, inboundFiltersIntegration } from './integrations/event-filters';
+export { dedupeIntegration } from './integrations/dedupe';
+export { consoleIntegration } from './integrations/console';
+export { httpClientIntegration } from './integrations/http-client';
+export { databaseIntegration } from './integrations/database';
 export type { TransportStats } from './transport/http';
-export type { ErrorEvent, Breadcrumb } from './modules/errors';
+export type { ErrorEvent, Breadcrumb, ErrorEventProcessor, EventFilterPattern, ErrorIngestPayload } from './modules/errors';
 export type { LogEvent, LogLevel } from './modules/logs';
 export type { ReplayEvent, DOMEvent } from './modules/session-replay';
 export type { HttpRequestItem } from './modules/http-requests';
 export type { HeartbeatOptions } from './modules/cron';
-export type { SpanData } from './modules/tracing';
+export type { SpanData, SpanProcessor, SpanFilterPattern } from './modules/tracing';
 export { Span } from './modules/tracing';
 export type { DbQueryItem } from './modules/database';
 export { DatabaseModule } from './modules/database';
@@ -50,6 +59,22 @@ export const AllStak = {
 
   clearBreadcrumbs(): void {
     ensureInit().clearBreadcrumbs();
+  },
+
+  addEventProcessor(processor: ErrorEventProcessor): void {
+    ensureInit().addEventProcessor(processor);
+  },
+
+  addSpanProcessor(processor: SpanProcessor): void {
+    ensureInit().addSpanProcessor(processor);
+  },
+
+  addIntegration(integration: AllStakIntegration): void {
+    ensureInit().addIntegration(integration);
+  },
+
+  getIntegration(name: string): AllStakIntegration | undefined {
+    return ensureInit().getIntegration(name);
   },
 
   /** Phase 3 — runtime SDK-identity override (used by RN install). */
@@ -106,6 +131,10 @@ export const AllStak = {
     return ensureInit().log;
   },
 
+  get logger() {
+    return ensureInit().logger;
+  },
+
   setUser(user: { id?: string; email?: string }): void {
     ensureInit().setUser(user);
   },
@@ -139,8 +168,9 @@ export const AllStak = {
   },
 
   /**
-   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   * Flush queued module batches and wait for in-flight transport work to drain.
+   * Resolves `true` if telemetry drains within `timeoutMs` (default 2000ms),
+   * `false` otherwise.
    */
   flush(timeoutMs?: number): Promise<boolean> {
     return ensureInit().flush(timeoutMs);
@@ -176,6 +206,17 @@ export const AllStak = {
     options?: { description?: string; tags?: Record<string, string> },
   ): Span {
     return ensureInit().startSpan(operation, options);
+  },
+
+  /**
+   * Run a sync or async function inside a span and finish it automatically.
+   */
+  trace<T>(
+    operation: string,
+    callback: (span: Span) => T,
+    options?: { description?: string; tags?: Record<string, string> },
+  ): T {
+    return ensureInit().trace(operation, callback, options);
   },
 
   /** Get the current trace ID (creates one if none exists). */

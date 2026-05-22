@@ -2,7 +2,7 @@ import { createRequire as __allstakCreateRequire } from 'node:module';
 const require = __allstakCreateRequire(import.meta.url);
 import {
   AllStak
-} from "./chunk-HSSEC23G.mjs";
+} from "./chunk-LH2BGYDJ.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 

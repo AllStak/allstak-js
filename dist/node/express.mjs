@@ -2,7 +2,7 @@ import { createRequire as __allstakCreateRequire } from 'node:module';
 const require = __allstakCreateRequire(import.meta.url);
 import {
   AllStak
-} from "./chunk-HSSEC23G.mjs";
+} from "./chunk-LH2BGYDJ.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 
@@ -51,54 +51,56 @@ var allstakExpress = {
       const path = pathFromRequest(req);
       const method = methodOf(req);
       const host = hostOf(req);
-      const upstreamTrace = req.headers["x-trace-id"] || req.headers["traceparent"];
-      if (upstreamTrace && typeof upstreamTrace === "string") {
-        sdk.setTraceId(upstreamTrace);
-      }
-      let rootSpan = null;
-      try {
-        rootSpan = sdk.startSpan(`${method} ${path}`, {
-          description: `HTTP ${method} ${path}`,
-          tags: {
-            "http.method": method,
-            "http.url": path,
-            "http.host": host
-          }
-        });
-      } catch {
-      }
-      const finalize = () => {
+      const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
+      sdk.withTraceContext(upstreamTrace, () => {
+        let rootSpan = null;
         try {
-          const durationMs = Date.now() - start;
-          const u = userFromRequest(req);
-          if (u) sdk.setUser(u);
-          AllStak.captureRequest({
-            direction: "inbound",
-            method,
-            host,
-            path,
-            statusCode: res.statusCode,
-            durationMs,
-            userId: u?.id,
-            timestamp: new Date(start).toISOString()
-          });
-          if (rootSpan) {
-            try {
-              rootSpan.setTag?.(
-                "http.status_code",
-                String(res.statusCode)
-              );
-              rootSpan.finish(res.statusCode >= 500 ? "error" : "ok");
-            } catch {
+          rootSpan = sdk.startSpan(`${method} ${path}`, {
+            description: `HTTP ${method} ${path}`,
+            tags: {
+              "http.method": method,
+              "http.url": path,
+              "http.host": host
             }
-          }
-          sdk.resetTrace();
+          });
         } catch {
         }
-      };
-      res.on("finish", finalize);
-      res.on("close", finalize);
-      next();
+        let finalized = false;
+        const finalize = () => {
+          if (finalized) return;
+          finalized = true;
+          try {
+            const durationMs = Date.now() - start;
+            const u = userFromRequest(req);
+            if (u) sdk.setUser(u);
+            AllStak.captureRequest({
+              direction: "inbound",
+              method,
+              host,
+              path,
+              statusCode: res.statusCode,
+              durationMs,
+              userId: u?.id,
+              timestamp: new Date(start).toISOString()
+            });
+            if (rootSpan) {
+              try {
+                rootSpan.setTag?.(
+                  "http.status_code",
+                  String(res.statusCode)
+                );
+                rootSpan.finish(res.statusCode >= 500 ? "error" : "ok");
+              } catch {
+              }
+            }
+            sdk.resetTrace();
+          } catch {
+          }
+        };
+        res.on("finish", finalize);
+        res.on("close", finalize);
+        next();
+      });
     };
   },
   /**
@@ -125,6 +127,15 @@ var allstakExpress = {
     };
   }
 };
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+function traceIdFromTraceparent(header) {
+  if (!header) return void 0;
+  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
+  return match?.[1];
+}
 var express_default = allstakExpress;
 export {
   allstakExpress,

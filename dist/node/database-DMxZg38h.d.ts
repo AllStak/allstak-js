@@ -12,6 +12,7 @@ declare class HttpTransport {
     private baseUrl;
     private apiKey;
     private buffer;
+    private inFlight;
     private flushing;
     private consecutiveFailures;
     private circuitOpenUntil;
@@ -23,12 +24,14 @@ declare class HttpTransport {
     constructor(baseUrl: string, apiKey: string);
     send(path: string, payload: unknown): Promise<void>;
     private enqueueOrDispatch;
+    private track;
     private dispatch;
     private doFetch;
     private scheduleFlush;
     private flushBuffer;
     private recordFailure;
     getBufferSize(): number;
+    flush(timeoutMs?: number): Promise<boolean>;
     noteDropped(count?: number): void;
     getStats(): TransportStats;
 }
@@ -67,8 +70,8 @@ declare class DatabaseModule {
      * when 20 items accumulate.
      */
     capture(item: DbQueryItem): void;
-    private flush;
+    flush(): void;
     destroy(): void;
 }
 
-export { DatabaseModule as D, type TransportStats as T, type DbQueryItem as a };
+export { DatabaseModule as D, HttpTransport as H, type TransportStats as T, type DbQueryItem as a };

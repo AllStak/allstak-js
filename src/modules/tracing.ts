@@ -17,6 +17,9 @@ export interface SpanData {
   data: string;
 }
 
+export type SpanProcessor = (span: SpanData) => SpanData | null | undefined;
+export type SpanFilterPattern = string | RegExp | ((span: SpanData) => boolean);
+
 interface SpanIngestPayload {
   spans: SpanData[];
 }
@@ -24,6 +27,23 @@ interface SpanIngestPayload {
 const INGEST_PATH = '/ingest/v1/spans';
 const FLUSH_INTERVAL_MS = 5_000;
 const BATCH_SIZE_THRESHOLD = 20;
+
+interface TraceState {
+  traceId: string | null;
+  spanStack: string[];
+}
+
+interface AsyncTraceStorage {
+  getStore(): TraceState | undefined;
+  run<T>(store: TraceState, callback: () => T): T;
+}
+
+declare const require: undefined | ((id: string) => { AsyncLocalStorage?: new () => AsyncTraceStorage });
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __ALLSTAK_NODE__: boolean | undefined;
+}
 
 export class Span {
   private _traceId: string;
@@ -123,38 +143,74 @@ export class TracingModule {
   private transport: HttpTransport;
   private service: string;
   private environment: string;
-  private currentTraceId: string | null = null;
-  private spanStack: string[] = [];
+  private globalState: TraceState = { traceId: null, spanStack: [] };
+  private asyncStorage: AsyncTraceStorage | null = createAsyncTraceStorage();
   private completedSpans: SpanData[] = [];
+  private spanProcessors: SpanProcessor[] = [];
+  private beforeSendSpan?: SpanProcessor;
+  private ignoreSpans: SpanFilterPattern[];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     transport: HttpTransport,
-    config: { service?: string; environment?: string },
+    config: {
+      service?: string;
+      environment?: string;
+      beforeSendSpan?: SpanProcessor;
+      ignoreSpans?: SpanFilterPattern[];
+    },
   ) {
     this.transport = transport;
     this.service = config.service || '';
     this.environment = config.environment || '';
+    this.beforeSendSpan = config.beforeSendSpan;
+    this.ignoreSpans = config.ignoreSpans ?? [];
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    if (typeof this.flushTimer === 'object' && typeof this.flushTimer.unref === 'function') {
+      this.flushTimer.unref();
+    }
+  }
+
+  addSpanProcessor(processor: SpanProcessor): void {
+    this.spanProcessors.push(processor);
+  }
+
+  /**
+   * Run work inside an isolated trace context. In Node this uses
+   * AsyncLocalStorage so overlapping requests don't share trace/span state.
+   * Browser builds fall back to the historical global context.
+   */
+  withTraceContext<T>(traceId: string | undefined, callback: () => T): T {
+    if (!this.asyncStorage) {
+      if (traceId) this.globalState.traceId = traceId;
+      return callback();
+    }
+    return this.asyncStorage.run({ traceId: traceId ?? null, spanStack: [] }, callback);
+  }
+
+  private state(): TraceState {
+    return this.asyncStorage?.getStore() ?? this.globalState;
   }
 
   /** Get the current trace ID, creating one if none exists. */
   getTraceId(): string {
-    if (!this.currentTraceId) {
-      this.currentTraceId = generateId().replace(/-/g, '');
+    const state = this.state();
+    if (!state.traceId) {
+      state.traceId = generateId().replace(/-/g, '');
     }
-    return this.currentTraceId;
+    return state.traceId;
   }
 
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId: string): void {
-    this.currentTraceId = traceId;
+    this.state().traceId = traceId;
   }
 
   /** Get the current active span ID (top of the span stack), or null. */
   getCurrentSpanId(): string | null {
-    return this.spanStack.length > 0
-      ? this.spanStack[this.spanStack.length - 1]
+    const state = this.state();
+    return state.spanStack.length > 0
+      ? state.spanStack[state.spanStack.length - 1]
       : null;
   }
 
@@ -166,11 +222,12 @@ export class TracingModule {
     operation: string,
     options?: { description?: string; tags?: Record<string, string> },
   ): Span {
+    const state = this.state();
     const spanId = generateId().replace(/-/g, '');
     const parentSpanId = this.getCurrentSpanId() || '';
     const traceId = this.getTraceId();
 
-    this.spanStack.push(spanId);
+    state.spanStack.push(spanId);
 
     const span = new Span({
       traceId,
@@ -183,9 +240,10 @@ export class TracingModule {
       tags: options?.tags || {},
       startTimeMillis: Date.now(),
       onFinish: (spanData: SpanData) => {
-        const idx = this.spanStack.indexOf(spanId);
-        if (idx >= 0) this.spanStack.splice(idx, 1);
-        this.completedSpans.push(spanData);
+        const idx = state.spanStack.indexOf(spanId);
+        if (idx >= 0) state.spanStack.splice(idx, 1);
+        const finalSpan = this.processSpan(spanData);
+        if (finalSpan) this.completedSpans.push(finalSpan);
         if (this.completedSpans.length >= BATCH_SIZE_THRESHOLD) {
           this.flush();
         }
@@ -205,8 +263,9 @@ export class TracingModule {
 
   /** Reset trace context — clears trace ID and span stack. */
   resetTrace(): void {
-    this.currentTraceId = null;
-    this.spanStack = [];
+    const state = this.state();
+    state.traceId = null;
+    state.spanStack = [];
   }
 
   /** Stop the flush timer and do a final flush. */
@@ -216,5 +275,50 @@ export class TracingModule {
       this.flushTimer = null;
     }
     this.flush();
+  }
+
+  private processSpan(span: SpanData): SpanData | null {
+    if (this.shouldIgnoreSpan(span)) return null;
+
+    let final: SpanData | null | undefined = span;
+    for (const processor of this.spanProcessors) {
+      if (!final) return null;
+      try {
+        final = processor(final) ?? null;
+      } catch {
+        // A broken span processor must not break application execution.
+      }
+    }
+
+    if (!final) return null;
+    if (this.beforeSendSpan) {
+      try {
+        final = this.beforeSendSpan(final) ?? null;
+      } catch {
+        // Keep the processed span if the hook itself fails.
+      }
+    }
+
+    return final ?? null;
+  }
+
+  private shouldIgnoreSpan(span: SpanData): boolean {
+    return this.ignoreSpans.some((pattern) => {
+      if (typeof pattern === 'function') return pattern(span);
+      const target = `${span.operation} ${span.description}`;
+      if (typeof pattern === 'string') return target.includes(pattern);
+      return pattern.test(target);
+    });
+  }
+}
+
+function createAsyncTraceStorage(): AsyncTraceStorage | null {
+  if (typeof globalThis.__ALLSTAK_NODE__ === 'undefined') return null;
+  try {
+    const req = typeof require === 'function' ? require : undefined;
+    const AsyncLocalStorage = req?.('node:async_hooks').AsyncLocalStorage;
+    return AsyncLocalStorage ? new AsyncLocalStorage() : null;
+  } catch {
+    return null;
   }
 }

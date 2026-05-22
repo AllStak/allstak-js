@@ -5,8 +5,15 @@ import {
   DatabaseModule,
   Scope,
   Span,
+  consoleIntegration,
+  databaseIntegration,
+  dedupeIntegration,
+  defineIntegration,
+  eventFiltersIntegration,
+  httpClientIntegration,
+  inboundFiltersIntegration,
   src_default
-} from "./chunk-HSSEC23G.mjs";
+} from "./chunk-LH2BGYDJ.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 export {
@@ -14,6 +21,13 @@ export {
   DatabaseModule,
   Scope,
   Span,
-  src_default as default
+  consoleIntegration,
+  databaseIntegration,
+  dedupeIntegration,
+  src_default as default,
+  defineIntegration,
+  eventFiltersIntegration,
+  httpClientIntegration,
+  inboundFiltersIntegration
 };
 //# sourceMappingURL=index.mjs.map

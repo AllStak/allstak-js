@@ -4,8 +4,8 @@
  * Usage:
  * ```ts
  * import express from 'express';
- * import { AllStak } from 'allstak-js';
- * import { allstakExpress } from 'allstak-js/express';
+ * import { AllStak } from '@allstak/js';
+ * import { allstakExpress } from '@allstak/js/express';
  *
  * AllStak.init({ apiKey: 'ask_live_…', environment: 'production' });
  *
@@ -100,65 +100,68 @@ export const allstakExpress = {
       const method = methodOf(req);
       const host = hostOf(req);
 
-      // Honor an upstream traceparent / X-Trace-Id if present
-      const upstreamTrace = (req.headers['x-trace-id'] || req.headers['traceparent']) as string | undefined;
-      if (upstreamTrace && typeof upstreamTrace === 'string') {
-        sdk.setTraceId(upstreamTrace);
-      }
+      // Honor upstream W3C traceparent or AllStak trace headers if present.
+      const upstreamTrace = firstHeader(req.headers['x-allstak-trace-id'])
+        ?? firstHeader(req.headers['x-trace-id'])
+        ?? traceIdFromTraceparent(firstHeader(req.headers['traceparent']));
 
-      // Open a root span for this request
-      let rootSpan: Span | null = null;
-      try {
-        rootSpan = sdk.startSpan(`${method} ${path}`, {
-          description: `HTTP ${method} ${path}`,
-          tags: {
-            'http.method': method,
-            'http.url': path,
-            'http.host': host,
-          },
-        });
-      } catch {
-        /* never break the request */
-      }
-
-      // Capture the inbound request when the response finishes
-      const finalize = (): void => {
+      sdk.withTraceContext(upstreamTrace, () => {
+        // Open a root span for this request.
+        let rootSpan: Span | null = null;
         try {
-          const durationMs = Date.now() - start;
-          const u = userFromRequest(req);
-          if (u) sdk.setUser(u);
-
-          AllStak.captureRequest({
-            direction: 'inbound',
-            method,
-            host,
-            path,
-            statusCode: res.statusCode,
-            durationMs,
-            userId: u?.id,
-            timestamp: new Date(start).toISOString(),
+          rootSpan = sdk.startSpan(`${method} ${path}`, {
+            description: `HTTP ${method} ${path}`,
+            tags: {
+              'http.method': method,
+              'http.url': path,
+              'http.host': host,
+            },
           });
-
-          if (rootSpan) {
-            try {
-              (rootSpan as unknown as { setTag?: (k: string, v: string) => void }).setTag?.(
-                'http.status_code',
-                String(res.statusCode),
-              );
-              rootSpan.finish(res.statusCode >= 500 ? 'error' : 'ok');
-            } catch {
-              /* best effort */
-            }
-          }
-          sdk.resetTrace();
         } catch {
-          /* never break the response */
+          /* never break the request */
         }
-      };
-      res.on('finish', finalize);
-      res.on('close', finalize);
 
-      next();
+        let finalized = false;
+        const finalize = (): void => {
+          if (finalized) return;
+          finalized = true;
+          try {
+            const durationMs = Date.now() - start;
+            const u = userFromRequest(req);
+            if (u) sdk.setUser(u);
+
+            AllStak.captureRequest({
+              direction: 'inbound',
+              method,
+              host,
+              path,
+              statusCode: res.statusCode,
+              durationMs,
+              userId: u?.id,
+              timestamp: new Date(start).toISOString(),
+            });
+
+            if (rootSpan) {
+              try {
+                (rootSpan as unknown as { setTag?: (k: string, v: string) => void }).setTag?.(
+                  'http.status_code',
+                  String(res.statusCode),
+                );
+                rootSpan.finish(res.statusCode >= 500 ? 'error' : 'ok');
+              } catch {
+                /* best effort */
+              }
+            }
+            sdk.resetTrace();
+          } catch {
+            /* never break the response */
+          }
+        };
+        res.on('finish', finalize);
+        res.on('close', finalize);
+
+        next();
+      });
     };
   },
 
@@ -192,5 +195,16 @@ export const allstakExpress = {
     };
   },
 };
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function traceIdFromTraceparent(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
+  return match?.[1];
+}
 
 export default allstakExpress;

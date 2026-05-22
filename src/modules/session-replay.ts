@@ -98,6 +98,9 @@ export class SessionReplayModule {
 
     this.startRecording();
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    if (typeof this.flushTimer === 'object' && typeof this.flushTimer.unref === 'function') {
+      this.flushTimer.unref();
+    }
   }
 
   private startRecording(): void {
@@ -295,7 +298,7 @@ export class SessionReplayModule {
     }
   }
 
-  private flush(): void {
+  flush(): void {
     if (this.events.length === 0) return;
 
     const batch = this.events.splice(0, this.events.length);

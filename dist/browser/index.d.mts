@@ -1,4 +1,113 @@
-import { D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-BIg-JJj9.mjs';
+import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-DMxZg38h.mjs';
+
+interface ErrorEvent {
+    type: 'error';
+    dsn: string;
+    timestamp: string;
+    level: 'fatal' | 'error' | 'warning' | 'info';
+    message: string;
+    stack?: string;
+    environment: string;
+    release?: string;
+    user?: {
+        id?: string;
+        email?: string;
+    };
+    tags?: Record<string, string>;
+    context?: Record<string, unknown>;
+}
+interface Breadcrumb {
+    timestamp: string;
+    type: string;
+    message: string;
+    level: string;
+    data?: Record<string, unknown>;
+}
+interface ErrorRequestContext {
+    method?: string;
+    path?: string;
+    host?: string;
+    statusCode?: number;
+    userAgent?: string;
+}
+/**
+ * v2 frame shape — matches backend {@code ErrorIngestRequest.Frame}.
+ * Sent alongside the legacy `stackTrace` string list so older backends
+ * keep working unchanged; new backends prefer `frames` when present.
+ */
+interface PayloadFrame {
+    filename?: string;
+    absPath?: string;
+    function?: string;
+    lineno?: number;
+    colno?: number;
+    inApp?: boolean;
+    platform?: string;
+    debugId?: string;
+}
+interface PayloadDebugImage {
+    type?: string;
+    debugId?: string;
+    codeFile?: string;
+    imageAddr?: string;
+}
+interface ErrorIngestPayload {
+    exceptionClass: string;
+    message: string;
+    stackTrace?: string[];
+    frames?: PayloadFrame[];
+    debugMeta?: {
+        images?: PayloadDebugImage[];
+    };
+    platform?: string;
+    sdkName?: string;
+    sdkVersion?: string;
+    dist?: string;
+    level: string;
+    environment?: string;
+    release?: string;
+    sessionId?: string;
+    traceId?: string;
+    spanId?: string;
+    parentSpanId?: string;
+    requestId?: string;
+    replayId?: string;
+    service?: string;
+    user?: {
+        id?: string;
+        email?: string;
+        ip?: string;
+    };
+    metadata?: Record<string, unknown>;
+    breadcrumbs?: Breadcrumb[];
+    requestContext?: ErrorRequestContext;
+    fingerprint?: string[];
+}
+type EventFilterPattern = string | RegExp;
+type ErrorEventProcessor = (event: ErrorIngestPayload) => ErrorIngestPayload | null | undefined | Promise<ErrorIngestPayload | null | undefined>;
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+interface LogEvent {
+    type: 'log';
+    dsn: string;
+    timestamp: string;
+    level: LogLevel;
+    message: string;
+    environment: string;
+    meta?: Record<string, unknown>;
+}
+type OnLogBreadcrumb = (level: LogLevel, message: string) => void;
+declare class LogModule {
+    private transport;
+    private config;
+    private onLogBreadcrumb;
+    constructor(transport: HttpTransport, config: AllStakConfig);
+    /**
+     * Register a callback for auto-breadcrumbs on warn/error/fatal logs.
+     */
+    setOnLogBreadcrumb(cb: OnLogBreadcrumb): void;
+    send(level: LogLevel, message: string, meta?: Record<string, unknown>): void;
+}
 
 interface HttpRequestItem {
     /** Unique trace identifier — generates one if not provided */
@@ -28,6 +137,31 @@ interface HttpRequestItem {
     /** ISO-8601 timestamp — defaults to now */
     timestamp?: string;
 }
+type OnCaptureBreadcrumb = (item: HttpRequestItem) => void;
+declare class HttpRequestModule {
+    private transport;
+    private queue;
+    private flushTimer;
+    private onCapture;
+    private defaults;
+    constructor(transport: HttpTransport);
+    /** Apply environment / release tags to every captured request. */
+    setDefaults(defaults: {
+        environment?: string;
+        release?: string;
+    }): void;
+    /**
+     * Register a callback invoked on every capture(), used for auto-breadcrumbs.
+     */
+    setOnCapture(cb: OnCaptureBreadcrumb): void;
+    /**
+     * Report an HTTP request (inbound or outbound) to AllStak.
+     * Batches internally and flushes every 5s or when 20 items accumulate.
+     */
+    capture(item: HttpRequestItem): void;
+    flush(): void;
+    destroy(): void;
+}
 
 interface HeartbeatOptions {
     /** The cron monitor slug as configured in the AllStak dashboard */
@@ -54,6 +188,11 @@ interface SpanData {
     environment: string;
     tags: Record<string, string>;
     data: string;
+}
+type SpanProcessor = (span: SpanData) => SpanData | null | undefined;
+type SpanFilterPattern = string | RegExp | ((span: SpanData) => boolean);
+declare global {
+    var __ALLSTAK_NODE__: boolean | undefined;
 }
 declare class Span {
     private _traceId;
@@ -96,12 +235,26 @@ declare class Span {
     get isFinished(): boolean;
 }
 
+type TracePropagationTarget = string | RegExp;
 interface HttpBodyCaptureOptions {
     enabled?: boolean;
     maxBodySize?: number;
     contentTypes?: string[];
     redactFields?: string[];
 }
+
+interface AllStakIntegration {
+    name: string;
+    setupOnce?: () => void;
+    setup?: (client: AllStakClient) => void;
+    processEvent?: (event: ErrorIngestPayload, client: AllStakClient) => ErrorIngestPayload | null | undefined | Promise<ErrorIngestPayload | null | undefined>;
+    processSpan?: (span: SpanData, client: AllStakClient) => SpanData | null | undefined;
+    isDefaultInstance?: boolean;
+}
+type IntegrationIndex = Record<string, AllStakIntegration>;
+type IntegrationFactory<Args extends unknown[] = unknown[]> = (...args: Args) => AllStakIntegration;
+type IntegrationOption = AllStakIntegration[] | ((defaultIntegrations: AllStakIntegration[]) => AllStakIntegration | AllStakIntegration[]);
+declare function defineIntegration<Fn extends IntegrationFactory>(factory: Fn): Fn;
 
 /**
  * Per-call scoped context isolation.
@@ -142,17 +295,6 @@ declare class Scope {
     setLevel(level: Severity): this;
     setFingerprint(fingerprint: string[] | null): this;
     clear(): this;
-}
-
-type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
-interface LogEvent {
-    type: 'log';
-    dsn: string;
-    timestamp: string;
-    level: LogLevel;
-    message: string;
-    environment: string;
-    meta?: Record<string, unknown>;
 }
 
 /**
@@ -244,6 +386,39 @@ interface AllStakConfig extends ReleaseMetadata {
      * the original event is sent so a buggy hook can't black-hole telemetry.
      */
     beforeSend?: (event: any) => any | null | undefined | Promise<any | null | undefined>;
+    /**
+     * Sentry-style event processors. Each processor can mutate an error event or
+     * return null to drop it before `beforeSend`.
+     */
+    eventProcessors?: ErrorEventProcessor[];
+    /** Drop errors whose message or exception class matches any pattern. */
+    ignoreErrors?: EventFilterPattern[];
+    /** Only send errors whose last useful stack frame URL matches one of these patterns. */
+    allowUrls?: EventFilterPattern[];
+    /** Drop errors whose last useful stack frame URL matches one of these patterns. */
+    denyUrls?: EventFilterPattern[];
+    /** Disable the built-in browser-noise ignore list. Default: false. */
+    disableDefaultIgnoreErrors?: boolean;
+    /** Drop consecutive duplicate error/message events. Default: true. */
+    dedupe?: boolean;
+    /**
+     * Mutate or drop spans before they are batched. Return null to drop.
+     */
+    beforeSendSpan?: SpanProcessor;
+    /**
+     * Drop spans matching an operation/description pattern or predicate.
+     */
+    ignoreSpans?: SpanFilterPattern[];
+    /**
+     * Default integrations. Set false to disable all built-in integrations, or
+     * provide a replacement list.
+     */
+    defaultIntegrations?: boolean | AllStakIntegration[];
+    /**
+     * Additional integrations, or a function that receives defaults and returns
+     * the final integration list.
+     */
+    integrations?: IntegrationOption;
     /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
     autoBreadcrumbs?: boolean;
     /** Enable automatic database instrumentation for pg and mysql2. Default: true */
@@ -263,6 +438,11 @@ interface AllStakConfig extends ReleaseMetadata {
      * redaction, and truncates bodies to maxBodySize.
      */
     httpBodyCapture?: HttpBodyCaptureOptions;
+    /**
+     * Limit distributed-tracing header propagation to matching URLs.
+     * Empty/undefined means all non-AllStak ingest requests are eligible.
+     */
+    tracePropagationTargets?: TracePropagationTarget[];
     /**
      * Optional fail-open screenshot capture. The SDK never bundles a screenshot
      * library; customers provide an async provider (e.g. html2canvas wrapper)
@@ -285,11 +465,15 @@ declare class AllStakClient {
     private cron;
     private tracing;
     private _database;
+    private baseUrl;
+    private integrations;
     private sessionReplay;
     private sessionId;
     private scopeStack;
     constructor(config: AllStakConfig);
     private isNodeBuild;
+    isNodeRuntime(): boolean;
+    getBaseUrl(): string;
     captureException(error: Error, context?: Record<string, unknown>): void;
     private withScopedConfig;
     withScope<T>(callback: (scope: Scope) => T): T;
@@ -301,6 +485,13 @@ declare class AllStakClient {
         data?: Record<string, unknown>;
     }, message?: string, level?: string, data?: Record<string, unknown>): void;
     clearBreadcrumbs(): void;
+    addEventProcessor(processor: ErrorEventProcessor): void;
+    addSpanProcessor(processor: SpanProcessor): void;
+    onLogBreadcrumb(callback: Parameters<LogModule['setOnLogBreadcrumb']>[0]): void;
+    onHttpRequestCaptured(callback: Parameters<HttpRequestModule['setOnCapture']>[0]): void;
+    addIntegration(integration: AllStakIntegration): void;
+    getIntegration(name: string): AllStakIntegration | undefined;
+    getOptions(): AllStakConfig;
     /**
      * Capture a freeform message. Routes to the **logs** ingest stream by default
      * (so messages appear in the dashboard's "Logs" view and don't pollute the
@@ -342,6 +533,13 @@ declare class AllStakClient {
         error: (message: string, meta?: Record<string, unknown>) => void;
         fatal: (message: string, meta?: Record<string, unknown>) => void;
     };
+    get logger(): {
+        debug: (message: string, meta?: Record<string, unknown>) => void;
+        info: (message: string, meta?: Record<string, unknown>) => void;
+        warn: (message: string, meta?: Record<string, unknown>) => void;
+        error: (message: string, meta?: Record<string, unknown>) => void;
+        fatal: (message: string, meta?: Record<string, unknown>) => void;
+    };
     setUser(user: {
         id?: string;
         email?: string;
@@ -367,8 +565,9 @@ declare class AllStakClient {
      */
     setFingerprint(fingerprint: string[] | null): void;
     /**
-     * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-     * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+     * Flush queued module batches and wait for in-flight transport work to
+     * finish. Resolves `true` when telemetry drains within `timeoutMs`
+     * (default 2000ms), `false` otherwise.
      */
     flush(timeoutMs?: number): Promise<boolean>;
     /**
@@ -393,6 +592,17 @@ declare class AllStakClient {
         description?: string;
         tags?: Record<string, string>;
     }): Span;
+    /**
+     * Sentry-style helper: creates a span, runs the callback, then finishes the
+     * span automatically. Async callbacks are supported, and thrown/rejected
+     * errors mark the span as failed before being rethrown.
+     */
+    trace<T>(operation: string, callback: (span: Span) => T, options?: {
+        description?: string;
+        tags?: Record<string, string>;
+    }): T;
+    /** @internal Used by server framework integrations to isolate request tracing. */
+    withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
     /** Get the current trace ID (creates one if none exists). */
     getTraceId(): string;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
@@ -414,29 +624,34 @@ declare global {
     var __ALLSTAK_NODE__: boolean | undefined;
 }
 
-interface ErrorEvent {
-    type: 'error';
-    dsn: string;
-    timestamp: string;
-    level: 'fatal' | 'error' | 'warning' | 'info';
-    message: string;
-    stack?: string;
-    environment: string;
-    release?: string;
-    user?: {
-        id?: string;
-        email?: string;
-    };
-    tags?: Record<string, string>;
-    context?: Record<string, unknown>;
-}
-interface Breadcrumb {
-    timestamp: string;
-    type: string;
-    message: string;
-    level: string;
-    data?: Record<string, unknown>;
-}
+declare const eventFiltersIntegration: () => {
+    name: string;
+    processEvent(event: ErrorIngestPayload, client: AllStakClient): ErrorIngestPayload | null;
+};
+declare const inboundFiltersIntegration: () => {
+    name: string;
+    processEvent(event: ErrorIngestPayload, client: AllStakClient): ErrorIngestPayload | null;
+};
+
+declare const dedupeIntegration: () => {
+    name: string;
+    processEvent(event: ErrorIngestPayload, client: AllStakClient): ErrorIngestPayload | null;
+};
+
+declare const consoleIntegration: () => {
+    name: string;
+    setup(client: AllStakClient): void;
+};
+
+declare const httpClientIntegration: () => {
+    name: string;
+    setup(client: AllStakClient): void;
+};
+
+declare const databaseIntegration: () => {
+    name: string;
+    setup(client: AllStakClient): void;
+};
 
 interface DOMEvent {
     type: string;
@@ -463,6 +678,10 @@ declare const AllStak: {
         data?: Record<string, unknown>;
     }, message?: string, level?: string, data?: Record<string, unknown>): void;
     clearBreadcrumbs(): void;
+    addEventProcessor(processor: ErrorEventProcessor): void;
+    addSpanProcessor(processor: SpanProcessor): void;
+    addIntegration(integration: AllStakIntegration): void;
+    getIntegration(name: string): AllStakIntegration | undefined;
     /** Phase 3 — runtime SDK-identity override (used by RN install). */
     setIdentity(identity: {
         sdkName?: string;
@@ -507,6 +726,13 @@ declare const AllStak: {
         error: (message: string, meta?: Record<string, unknown>) => void;
         fatal: (message: string, meta?: Record<string, unknown>) => void;
     };
+    readonly logger: {
+        debug: (message: string, meta?: Record<string, unknown>) => void;
+        info: (message: string, meta?: Record<string, unknown>) => void;
+        warn: (message: string, meta?: Record<string, unknown>) => void;
+        error: (message: string, meta?: Record<string, unknown>) => void;
+        fatal: (message: string, meta?: Record<string, unknown>) => void;
+    };
     setUser(user: {
         id?: string;
         email?: string;
@@ -519,8 +745,9 @@ declare const AllStak: {
     setLevel(level: "fatal" | "error" | "warning" | "info" | "debug"): void;
     setFingerprint(fingerprint: string[] | null): void;
     /**
-     * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-     * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+     * Flush queued module batches and wait for in-flight transport work to drain.
+     * Resolves `true` if telemetry drains within `timeoutMs` (default 2000ms),
+     * `false` otherwise.
      */
     flush(timeoutMs?: number): Promise<boolean>;
     /**
@@ -539,6 +766,13 @@ declare const AllStak: {
         description?: string;
         tags?: Record<string, string>;
     }): Span;
+    /**
+     * Run a sync or async function inside a span and finish it automatically.
+     */
+    trace<T>(operation: string, callback: (span: Span) => T, options?: {
+        description?: string;
+        tags?: Record<string, string>;
+    }): T;
     /** Get the current trace ID (creates one if none exists). */
     getTraceId(): string;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
@@ -552,4 +786,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type HeartbeatOptions, type HttpRequestItem, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, TransportStats, AllStak as default };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanProcessor, TransportStats, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration };

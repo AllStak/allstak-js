@@ -20,6 +20,7 @@ export interface TransportStats {
 
 export class HttpTransport {
   private buffer = new EventBuffer();
+  private inFlight = new Set<Promise<void>>();
   private flushing = false;
   private consecutiveFailures = 0;
   private circuitOpenUntil = 0;
@@ -44,7 +45,12 @@ export class HttpTransport {
       if (this.buffer.push(item)) this.dropped++;
       return;
     }
-    void this.dispatch(item).catch(() => undefined);
+    this.track(this.dispatch(item));
+  }
+
+  private track(promise: Promise<void>): void {
+    this.inFlight.add(promise);
+    promise.finally(() => this.inFlight.delete(promise)).catch(() => undefined);
   }
 
   private async dispatch(item: Pending): Promise<void> {
@@ -138,6 +144,26 @@ export class HttpTransport {
 
   getBufferSize(): number {
     return this.buffer.size;
+  }
+
+  async flush(timeoutMs = 2000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (true) {
+      if (this.buffer.size > 0 && !this.flushing && Date.now() >= this.circuitOpenUntil) {
+        await this.flushBuffer();
+      }
+
+      if (this.buffer.size === 0 && this.inFlight.size === 0 && !this.flushing) {
+        return true;
+      }
+
+      if (Date.now() >= deadline) {
+        return false;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   noteDropped(count = 1): void {

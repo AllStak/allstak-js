@@ -63,6 +63,7 @@ var HttpTransport = class {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.buffer = new EventBuffer();
+    this.inFlight = /* @__PURE__ */ new Set();
     this.flushing = false;
     this.consecutiveFailures = 0;
     this.circuitOpenUntil = 0;
@@ -79,7 +80,11 @@ var HttpTransport = class {
       if (this.buffer.push(item)) this.dropped++;
       return;
     }
-    void this.dispatch(item).catch(() => void 0);
+    this.track(this.dispatch(item));
+  }
+  track(promise) {
+    this.inFlight.add(promise);
+    promise.finally(() => this.inFlight.delete(promise)).catch(() => void 0);
   }
   async dispatch(item) {
     try {
@@ -164,6 +169,21 @@ var HttpTransport = class {
   }
   getBufferSize() {
     return this.buffer.size;
+  }
+  async flush(timeoutMs = 2e3) {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      if (this.buffer.size > 0 && !this.flushing && Date.now() >= this.circuitOpenUntil) {
+        await this.flushBuffer();
+      }
+      if (this.buffer.size === 0 && this.inFlight.size === 0 && !this.flushing) {
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
   noteDropped(count = 1) {
     this.dropped += Math.max(0, count);
@@ -416,8 +436,12 @@ var ErrorModule = class {
     this.onErrorHandler = null;
     this.onUnhandledRejectionHandler = null;
     this.breadcrumbs = [];
+    this.eventProcessors = [];
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     this.setupAutocapture();
+  }
+  addEventProcessor(processor) {
+    this.eventProcessors.push(processor);
   }
   addBreadcrumb(type, message, level, data) {
     const crumb = {
@@ -505,7 +529,7 @@ var ErrorModule = class {
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint
     };
-    this.sendThroughBeforeSend(payload);
+    this.sendThroughPipeline(payload);
   }
   captureMessage(message, level = "info", options) {
     if (!this.passesSampleRate()) return;
@@ -527,7 +551,7 @@ var ErrorModule = class {
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint
     };
-    this.sendThroughBeforeSend(payload);
+    this.sendThroughPipeline(payload);
   }
   // ── Filtering / control ─────────────────────────────────────────────
   passesSampleRate() {
@@ -555,18 +579,29 @@ var ErrorModule = class {
     }
     return out;
   }
-  async sendThroughBeforeSend(payload) {
+  async sendThroughPipeline(payload) {
     let final = payload;
+    for (const processor of this.allEventProcessors()) {
+      if (!final) return;
+      try {
+        final = await processor(final);
+      } catch {
+      }
+    }
+    if (!final) return;
     const beforeSend = this.config.beforeSend;
     if (typeof beforeSend === "function") {
       try {
-        final = await beforeSend(payload);
+        final = await beforeSend(final);
       } catch {
-        final = payload;
       }
     }
     if (!final) return;
     this.transport.send(INGEST_PATH, final);
+  }
+  allEventProcessors() {
+    const configured = this.config.eventProcessors ?? [];
+    return [...configured, ...this.eventProcessors];
   }
   setupAutocapture() {
     if (typeof window === "undefined") return;
@@ -747,6 +782,9 @@ var SessionReplayModule = class {
     if (Math.random() > sampleRate) return;
     this.startRecording();
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
+    if (typeof this.flushTimer === "object" && typeof this.flushTimer.unref === "function") {
+      this.flushTimer.unref();
+    }
   }
   startRecording() {
     if (typeof document === "undefined") return;
@@ -929,6 +967,9 @@ var HttpRequestModule = class {
     this.onCapture = null;
     this.defaults = {};
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS2);
+    if (typeof this.flushTimer === "object" && typeof this.flushTimer.unref === "function") {
+      this.flushTimer.unref();
+    }
   }
   /** Apply environment / release tags to every captured request. */
   setDefaults(defaults) {
@@ -1104,39 +1145,66 @@ var Span = class {
 };
 var TracingModule = class {
   constructor(transport, config) {
-    this.currentTraceId = null;
-    this.spanStack = [];
+    this.globalState = { traceId: null, spanStack: [] };
+    this.asyncStorage = createAsyncTraceStorage();
     this.completedSpans = [];
+    this.spanProcessors = [];
     this.flushTimer = null;
     this.transport = transport;
     this.service = config.service || "";
     this.environment = config.environment || "";
+    this.beforeSendSpan = config.beforeSendSpan;
+    this.ignoreSpans = config.ignoreSpans ?? [];
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS3);
+    if (typeof this.flushTimer === "object" && typeof this.flushTimer.unref === "function") {
+      this.flushTimer.unref();
+    }
+  }
+  addSpanProcessor(processor) {
+    this.spanProcessors.push(processor);
+  }
+  /**
+   * Run work inside an isolated trace context. In Node this uses
+   * AsyncLocalStorage so overlapping requests don't share trace/span state.
+   * Browser builds fall back to the historical global context.
+   */
+  withTraceContext(traceId, callback) {
+    if (!this.asyncStorage) {
+      if (traceId) this.globalState.traceId = traceId;
+      return callback();
+    }
+    return this.asyncStorage.run({ traceId: traceId ?? null, spanStack: [] }, callback);
+  }
+  state() {
+    return this.asyncStorage?.getStore() ?? this.globalState;
   }
   /** Get the current trace ID, creating one if none exists. */
   getTraceId() {
-    if (!this.currentTraceId) {
-      this.currentTraceId = generateId().replace(/-/g, "");
+    const state = this.state();
+    if (!state.traceId) {
+      state.traceId = generateId().replace(/-/g, "");
     }
-    return this.currentTraceId;
+    return state.traceId;
   }
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
-    this.currentTraceId = traceId;
+    this.state().traceId = traceId;
   }
   /** Get the current active span ID (top of the span stack), or null. */
   getCurrentSpanId() {
-    return this.spanStack.length > 0 ? this.spanStack[this.spanStack.length - 1] : null;
+    const state = this.state();
+    return state.spanStack.length > 0 ? state.spanStack[state.spanStack.length - 1] : null;
   }
   /**
    * Start a new span. The span is automatically parented to the current
    * active span (if any). Call span.finish() when the operation completes.
    */
   startSpan(operation, options) {
+    const state = this.state();
     const spanId = generateId().replace(/-/g, "");
     const parentSpanId = this.getCurrentSpanId() || "";
     const traceId = this.getTraceId();
-    this.spanStack.push(spanId);
+    state.spanStack.push(spanId);
     const span = new Span({
       traceId,
       spanId,
@@ -1148,9 +1216,10 @@ var TracingModule = class {
       tags: options?.tags || {},
       startTimeMillis: Date.now(),
       onFinish: (spanData) => {
-        const idx = this.spanStack.indexOf(spanId);
-        if (idx >= 0) this.spanStack.splice(idx, 1);
-        this.completedSpans.push(spanData);
+        const idx = state.spanStack.indexOf(spanId);
+        if (idx >= 0) state.spanStack.splice(idx, 1);
+        const finalSpan = this.processSpan(spanData);
+        if (finalSpan) this.completedSpans.push(finalSpan);
         if (this.completedSpans.length >= BATCH_SIZE_THRESHOLD3) {
           this.flush();
         }
@@ -1167,8 +1236,9 @@ var TracingModule = class {
   }
   /** Reset trace context — clears trace ID and span stack. */
   resetTrace() {
-    this.currentTraceId = null;
-    this.spanStack = [];
+    const state = this.state();
+    state.traceId = null;
+    state.spanStack = [];
   }
   /** Stop the flush timer and do a final flush. */
   destroy() {
@@ -1178,7 +1248,44 @@ var TracingModule = class {
     }
     this.flush();
   }
+  processSpan(span) {
+    if (this.shouldIgnoreSpan(span)) return null;
+    let final = span;
+    for (const processor of this.spanProcessors) {
+      if (!final) return null;
+      try {
+        final = processor(final) ?? null;
+      } catch {
+      }
+    }
+    if (!final) return null;
+    if (this.beforeSendSpan) {
+      try {
+        final = this.beforeSendSpan(final) ?? null;
+      } catch {
+      }
+    }
+    return final ?? null;
+  }
+  shouldIgnoreSpan(span) {
+    return this.ignoreSpans.some((pattern) => {
+      if (typeof pattern === "function") return pattern(span);
+      const target = `${span.operation} ${span.description}`;
+      if (typeof pattern === "string") return target.includes(pattern);
+      return pattern.test(target);
+    });
+  }
 };
+function createAsyncTraceStorage() {
+  if (false) return null;
+  try {
+    const req = typeof require === "function" ? require : void 0;
+    const AsyncLocalStorage = req?.("node:async_hooks").AsyncLocalStorage;
+    return AsyncLocalStorage ? new AsyncLocalStorage() : null;
+  } catch {
+    return null;
+  }
+}
 
 // src/integrations/db/shared.ts
 var traceResolver = null;
@@ -1647,6 +1754,9 @@ var DatabaseModule = class {
     this.queue = [];
     this.flushTimer = null;
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS4);
+    if (typeof this.flushTimer === "object" && typeof this.flushTimer.unref === "function") {
+      this.flushTimer.unref();
+    }
   }
   /**
    * Record a database query. Batches internally and flushes every 5s or
@@ -1682,8 +1792,64 @@ function enableDbAutoInstrumentation(dbModule, config) {
   instrumentSqlite(dbModule, config);
 }
 
+// src/integration.ts
+var installedOnce = /* @__PURE__ */ new Set();
+function defineIntegration(factory) {
+  return factory;
+}
+function getIntegrationsToSetup(options) {
+  const defaults = resolveDefaultIntegrations(options.defaultIntegrations);
+  for (const integration of defaults) {
+    integration.isDefaultInstance = true;
+  }
+  const user = options.integrations;
+  if (Array.isArray(user)) {
+    return filterDuplicateIntegrations([...defaults, ...user]);
+  }
+  if (typeof user === "function") {
+    const resolved = user(defaults);
+    return filterDuplicateIntegrations(Array.isArray(resolved) ? resolved : [resolved]);
+  }
+  return filterDuplicateIntegrations(defaults);
+}
+function setupIntegrations(client, integrations) {
+  const index = {};
+  for (const integration of integrations) {
+    if (index[integration.name]) continue;
+    index[integration.name] = integration;
+    if (integration.setupOnce && !installedOnce.has(integration.name)) {
+      integration.setupOnce();
+      installedOnce.add(integration.name);
+    }
+    integration.setup?.(client);
+    if (integration.processEvent) {
+      client.addEventProcessor((event) => integration.processEvent(event, client));
+    }
+    if (integration.processSpan) {
+      client.addSpanProcessor((span) => integration.processSpan(span, client));
+    }
+  }
+  return index;
+}
+function resolveDefaultIntegrations(value) {
+  if (value === false) return [];
+  if (Array.isArray(value)) return [...value];
+  return [];
+}
+function filterDuplicateIntegrations(integrations) {
+  const byName = {};
+  for (const integration of integrations) {
+    const existing = byName[integration.name];
+    if (existing && !existing.isDefaultInstance && integration.isDefaultInstance) {
+      continue;
+    }
+    byName[integration.name] = integration;
+  }
+  return Object.values(byName);
+}
+
 // src/modules/auto-breadcrumbs.ts
-function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext, bodyCapture) {
+function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext, bodyCapture, tracePropagationTargets) {
   if (typeof globalThis.fetch !== "function") return;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async function(input, init) {
@@ -1694,7 +1860,8 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext
     const correlation = !isOwnIngest ? traceContext?.() : void 0;
     const requestId = correlation?.requestId ?? generateRequestId();
     const traceId = correlation?.traceId;
-    const propagatedInit = !isOwnIngest && traceId ? withTraceHeaders(init, traceId, requestId) : init;
+    const shouldPropagate = !isOwnIngest && traceId && targetMatches(url, tracePropagationTargets);
+    const propagatedInit = shouldPropagate ? withTraceHeaders(input, init, traceId, requestId) : init;
     let host = "";
     let path = safePath;
     try {
@@ -1859,15 +2026,54 @@ function generateRequestId() {
     return v.toString(16);
   });
 }
-function withTraceHeaders(init, traceId, requestId) {
+function targetMatches(url, targets) {
+  if (!targets || targets.length === 0) return true;
+  return targets.some((target) => typeof target === "string" ? url.includes(target) : target.test(url));
+}
+function withTraceHeaders(input, init, traceId, requestId) {
   const next = { ...init ?? {} };
-  const headers = new Headers(init?.headers ?? {});
+  const headers = new Headers(init?.headers ?? requestHeadersFromInput(input));
   const spanId = requestId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
-  headers.set("traceparent", `00-${traceId.replace(/-/g, "").slice(0, 32).padEnd(32, "0")}-${spanId}-01`);
-  headers.set("x-allstak-trace-id", traceId);
-  headers.set("x-allstak-request-id", requestId);
+  const traceparent = `00-${normalizeTraceId(traceId)}-${normalizeSpanId(spanId)}-01`;
+  const baggage = [
+    `allstak-trace_id=${encodeURIComponent(traceId)}`,
+    `allstak-span_id=${encodeURIComponent(spanId)}`,
+    `allstak-request_id=${encodeURIComponent(requestId)}`
+  ].join(",");
+  setHeaderIfMissing(headers, "traceparent", traceparent);
+  setHeaderIfMissing(headers, "allstak-trace", `${traceId}-${spanId}-1`);
+  mergeAllStakBaggage(headers, baggage);
+  setHeaderIfMissing(headers, "x-allstak-trace-id", traceId);
+  setHeaderIfMissing(headers, "x-allstak-request-id", requestId);
   next.headers = headers;
   return next;
+}
+function requestHeadersFromInput(input) {
+  if (typeof Request !== "undefined" && input instanceof Request) return input.headers;
+  return void 0;
+}
+function setHeaderIfMissing(headers, key, value) {
+  if (!headers.has(key)) headers.set(key, value);
+}
+function mergeAllStakBaggage(headers, baggage) {
+  const allstakBaggage = headers.get("allstak-baggage");
+  if (!allstakBaggage) {
+    headers.set("allstak-baggage", baggage);
+  } else if (!allstakBaggage.includes("allstak-trace_id=")) {
+    headers.set("allstak-baggage", `${allstakBaggage},${baggage}`);
+  }
+  const standardBaggage = headers.get("baggage");
+  if (!standardBaggage) {
+    headers.set("baggage", baggage);
+  } else if (!standardBaggage.includes("allstak-trace_id=")) {
+    headers.set("baggage", `${standardBaggage},${baggage}`);
+  }
+}
+function normalizeTraceId(traceId) {
+  return traceId.replace(/-/g, "").slice(0, 32).padEnd(32, "0");
+}
+function normalizeSpanId(spanId) {
+  return spanId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
 }
 function instrumentConsole(addBreadcrumb) {
   if (typeof console === "undefined") return;
@@ -1881,6 +2087,124 @@ function instrumentConsole(addBreadcrumb) {
     addBreadcrumb("log", args.map(String).join(" "), "error");
     origError.apply(console, args);
   };
+}
+
+// src/integrations/console.ts
+var consoleIntegration = defineIntegration(() => ({
+  name: "Console",
+  setup(client) {
+    if (client.getOptions().autoBreadcrumbs === false) return;
+    instrumentConsole((type, msg, level, data) => client.addBreadcrumb(type, msg, level, data));
+    client.onLogBreadcrumb((level, message) => {
+      const breadcrumbLevel = level === "warn" ? "warn" : "error";
+      client.addBreadcrumb("log", message, breadcrumbLevel, { logLevel: level });
+    });
+  }
+}));
+
+// src/integrations/database.ts
+var databaseIntegration = defineIntegration(() => ({
+  name: "Database",
+  setup(client) {
+    const options = client.getOptions();
+    if (options.autoDbInstrumentation === false) return;
+    if (!client.isNodeRuntime()) return;
+    enableDbAutoInstrumentation(client.database, {
+      service: options.tags?.service,
+      environment: options.environment
+    });
+  }
+}));
+
+// src/integrations/dedupe.ts
+var dedupeIntegration = defineIntegration(() => {
+  let previousEventSignature = null;
+  return {
+    name: "Dedupe",
+    processEvent(event, client) {
+      if (client.getOptions().dedupe === false) return event;
+      const signature = eventSignature(event);
+      if (!signature) return event;
+      if (signature === previousEventSignature) return null;
+      previousEventSignature = signature;
+      return event;
+    }
+  };
+});
+function eventSignature(payload) {
+  const frameKey = (payload.frames ?? []).map((frame) => [
+    frame.filename ?? "",
+    frame.function ?? "",
+    frame.lineno ?? "",
+    frame.colno ?? ""
+  ].join(":")).join("|");
+  const fingerprint = payload.fingerprint?.join("\0") ?? "";
+  const base = [
+    payload.exceptionClass,
+    payload.message,
+    fingerprint,
+    frameKey
+  ].join("");
+  return base.trim().length > 0 ? base : null;
+}
+
+// src/integrations/event-filters.ts
+var DEFAULT_IGNORE_ERRORS = [
+  /^Script error\.?$/i,
+  /^Javascript error: Script error\.? on line 0$/i,
+  /^ResizeObserver loop completed with undelivered notifications\.?$/i,
+  /^ResizeObserver loop limit exceeded$/i,
+  /^Non-Error promise rejection captured with value: null$/i,
+  /^Non-Error promise rejection captured with value: undefined$/i
+];
+var eventFiltersIntegration = defineIntegration(() => ({
+  name: "EventFilters",
+  processEvent(event, client) {
+    const options = client.getOptions();
+    return shouldDropEvent(event, options) ? null : event;
+  }
+}));
+function shouldDropEvent(payload, config) {
+  const ignoreErrors = [
+    ...config.disableDefaultIgnoreErrors ? [] : DEFAULT_IGNORE_ERRORS,
+    ...config.ignoreErrors ?? []
+  ];
+  if (matchesAny(possibleMessages(payload), ignoreErrors)) return true;
+  const url = eventFilterUrl(payload);
+  const denyUrls = config.denyUrls ?? [];
+  if (url && matchesPattern(url, denyUrls)) return true;
+  const allowUrls = config.allowUrls ?? [];
+  if (allowUrls.length > 0 && url && !matchesPattern(url, allowUrls)) return true;
+  return false;
+}
+function possibleMessages(payload) {
+  return [
+    payload.message,
+    `${payload.exceptionClass}: ${payload.message}`,
+    payload.exceptionClass
+  ].filter((value) => typeof value === "string" && value.length > 0);
+}
+function matchesAny(values, patterns) {
+  return values.some((value) => matchesPattern(value, patterns));
+}
+function matchesPattern(value, patterns) {
+  return patterns.some((pattern) => {
+    if (typeof pattern === "string") return value.includes(pattern);
+    return pattern.test(value);
+  });
+}
+function eventFilterUrl(payload) {
+  const frames = payload.frames;
+  if (frames?.length) {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const frame = frames[i];
+      const candidate = frame.filename || frame.absPath;
+      if (candidate && candidate !== "<anonymous>" && candidate !== "[native code]") {
+        return candidate;
+      }
+    }
+  }
+  return payload.requestContext?.path || payload.requestContext?.host;
 }
 
 // src/modules/auto-node-http.ts
@@ -2008,6 +2332,53 @@ function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl) {
   return () => restorers.forEach((r) => r());
 }
 
+// src/integrations/http-client.ts
+var httpClientIntegration = defineIntegration(() => ({
+  name: "HttpClient",
+  setup(client) {
+    const options = client.getOptions();
+    if (options.autoBreadcrumbs === false) return;
+    const baseUrl = client.getBaseUrl();
+    instrumentFetch(
+      (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
+      (item) => client.captureRequest({ ...item, method: item.method }),
+      baseUrl,
+      () => ({ traceId: client.getTraceId() }),
+      options.httpBodyCapture,
+      options.tracePropagationTargets
+    );
+    if (client.isNodeRuntime()) {
+      try {
+        instrumentNodeHttp(
+          (item) => client.captureRequest({ ...item, method: item.method }),
+          (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
+          baseUrl
+        );
+      } catch {
+      }
+    }
+    client.onHttpRequestCaptured((item) => {
+      client.addBreadcrumb(
+        "http",
+        `${item.method} ${item.path} -> ${item.statusCode}`,
+        item.statusCode >= 400 ? "error" : "info",
+        { method: item.method, path: item.path, statusCode: item.statusCode, durationMs: item.durationMs }
+      );
+    });
+  }
+}));
+
+// src/integrations/defaults.ts
+function getDefaultIntegrations() {
+  return [
+    eventFiltersIntegration(),
+    dedupeIntegration(),
+    consoleIntegration(),
+    httpClientIntegration(),
+    databaseIntegration()
+  ];
+}
+
 // src/scope.ts
 var Scope = class {
   constructor() {
@@ -2123,6 +2494,7 @@ function resolveTransport(config) {
 }
 var AllStakClient = class {
   constructor(config) {
+    this.integrations = {};
     this.sessionReplay = null;
     this.scopeStack = [];
     // ─── Node uncaughtException / unhandledRejection auto-capture ─────
@@ -2132,6 +2504,7 @@ var AllStakClient = class {
     this.config = config;
     this.sessionId = generateId();
     const { baseUrl, apiKey } = resolveTransport(config);
+    this.baseUrl = baseUrl;
     this.transport = new HttpTransport(baseUrl, apiKey);
     if (config.autoNodeErrorCapture !== false && typeof process !== "undefined" && typeof window === "undefined") {
       this.installNodeErrorHandlers();
@@ -2148,16 +2521,20 @@ var AllStakClient = class {
       service: config.tags?.service,
       environment: config.environment
     });
-    if (config.autoDbInstrumentation !== false && typeof window === "undefined") {
-      enableDbAutoInstrumentation(this._database, {
-        service: config.tags?.service,
-        environment: config.environment
-      });
-    }
     this.tracing = new TracingModule(this.transport, {
       service: config.tags?.service,
-      environment: config.environment
+      environment: config.environment,
+      beforeSendSpan: config.beforeSendSpan,
+      ignoreSpans: config.ignoreSpans
     });
+    const defaultIntegrations = config.defaultIntegrations === void 0 ? getDefaultIntegrations() : config.defaultIntegrations;
+    this.integrations = setupIntegrations(
+      this,
+      getIntegrationsToSetup({
+        defaultIntegrations,
+        integrations: config.integrations
+      })
+    );
     setTraceResolver(() => ({
       traceId: this.tracing.getTraceId() ?? void 0,
       spanId: this.tracing.getCurrentSpanId() ?? void 0
@@ -2169,41 +2546,15 @@ var AllStakClient = class {
         this.sessionId
       );
     }
-    if (config.autoBreadcrumbs !== false) {
-      instrumentFetch(
-        (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
-        (item) => this.captureRequest({ ...item, method: item.method }),
-        baseUrl,
-        () => ({ traceId: this.tracing.getTraceId() }),
-        config.httpBodyCapture
-      );
-      instrumentConsole((type, msg, level, data) => this.addBreadcrumb(type, msg, level, data));
-      if (this.isNodeBuild() || typeof process !== "undefined" && process.versions?.node) {
-        try {
-          instrumentNodeHttp(
-            (item) => this.captureRequest({ ...item, method: item.method }),
-            (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
-            baseUrl
-          );
-        } catch {
-        }
-      }
-      this.logs.setOnLogBreadcrumb((level, message) => {
-        const bcLevel = level === "warn" ? "warn" : "error";
-        this.addBreadcrumb("log", message, bcLevel, { logLevel: level });
-      });
-      this.httpRequests.setOnCapture((item) => {
-        this.addBreadcrumb(
-          "http",
-          `${item.method} ${item.path} -> ${item.statusCode}`,
-          item.statusCode >= 400 ? "error" : "info",
-          { method: item.method, path: item.path, statusCode: item.statusCode, durationMs: item.durationMs }
-        );
-      });
-    }
   }
   isNodeBuild() {
     return true;
+  }
+  isNodeRuntime() {
+    return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
+  }
+  getBaseUrl() {
+    return this.baseUrl;
   }
   captureException(error, context) {
     const traceContext = {};
@@ -2287,6 +2638,37 @@ var AllStakClient = class {
   clearBreadcrumbs() {
     this.errors.clearBreadcrumbs();
   }
+  addEventProcessor(processor) {
+    this.errors.addEventProcessor(processor);
+  }
+  addSpanProcessor(processor) {
+    this.tracing.addSpanProcessor(processor);
+  }
+  onLogBreadcrumb(callback) {
+    this.logs.setOnLogBreadcrumb(callback);
+  }
+  onHttpRequestCaptured(callback) {
+    this.httpRequests.setOnCapture(callback);
+  }
+  addIntegration(integration) {
+    const existing = this.integrations[integration.name];
+    if (existing) return;
+    this.integrations[integration.name] = integration;
+    integration.setupOnce?.();
+    integration.setup?.(this);
+    if (integration.processEvent) {
+      this.addEventProcessor((event) => integration.processEvent(event, this));
+    }
+    if (integration.processSpan) {
+      this.addSpanProcessor((span) => integration.processSpan(span, this));
+    }
+  }
+  getIntegration(name) {
+    return this.integrations[name];
+  }
+  getOptions() {
+    return this.config;
+  }
   /**
    * Capture a freeform message. Routes to the **logs** ingest stream by default
    * (so messages appear in the dashboard's "Logs" view and don't pollute the
@@ -2359,6 +2741,9 @@ var AllStakClient = class {
       fatal: (message, meta) => this.logs.send("fatal", message, withTrace(meta))
     };
   }
+  get logger() {
+    return this.log;
+  }
   setUser(user) {
     this.config.user = user;
   }
@@ -2403,16 +2788,16 @@ var AllStakClient = class {
     this.config.fingerprint = fingerprint && fingerprint.length > 0 ? fingerprint : void 0;
   }
   /**
-   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   * Flush queued module batches and wait for in-flight transport work to
+   * finish. Resolves `true` when telemetry drains within `timeoutMs`
+   * (default 2000ms), `false` otherwise.
    */
   async flush(timeoutMs = 2e3) {
-    const deadline = Date.now() + timeoutMs;
-    while (this.transport.getBufferSize() > 0) {
-      if (Date.now() >= deadline) return false;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    return true;
+    this.httpRequests.flush();
+    this._database.flush();
+    this.tracing.flush();
+    this.sessionReplay?.flush();
+    return this.transport.flush(timeoutMs);
   }
   /**
    * Phase 3 — runtime override of the SDK identity fields. Used by
@@ -2441,6 +2826,45 @@ var AllStakClient = class {
    */
   startSpan(operation, options) {
     return this.tracing.startSpan(operation, options);
+  }
+  /**
+   * Sentry-style helper: creates a span, runs the callback, then finishes the
+   * span automatically. Async callbacks are supported, and thrown/rejected
+   * errors mark the span as failed before being rethrown.
+   */
+  trace(operation, callback, options) {
+    const span = this.tracing.startSpan(operation, options);
+    let finished = false;
+    const finish = (status) => {
+      if (!finished) {
+        finished = true;
+        span.finish(status);
+      }
+    };
+    try {
+      const result = callback(span);
+      if (result && typeof result.then === "function") {
+        return result.then(
+          (value) => {
+            finish("ok");
+            return value;
+          },
+          (error) => {
+            finish("error");
+            throw error;
+          }
+        );
+      }
+      finish("ok");
+      return result;
+    } catch (error) {
+      finish("error");
+      throw error;
+    }
+  }
+  /** @internal Used by server framework integrations to isolate request tracing. */
+  withTraceContext(traceId, callback) {
+    return this.tracing.withTraceContext(traceId, callback);
   }
   /** Get the current trace ID (creates one if none exists). */
   getTraceId() {
@@ -2513,18 +2937,24 @@ var AllStakClient = class {
       return;
     }
     this.nodeUncaughtHandler = (err) => {
+      const e = err instanceof Error ? err : new Error(String(err));
       try {
-        const e = err instanceof Error ? err : new Error(String(err));
         this.errors.captureException(e, { source: "uncaughtException" });
       } catch {
       }
+      this.uninstallNodeErrorHandlers();
+      throw e;
     };
     this.nodeRejectionHandler = (reason) => {
+      const e = reason instanceof Error ? reason : new Error(String(reason));
       try {
-        const e = reason instanceof Error ? reason : new Error(String(reason));
         this.errors.captureException(e, { source: "unhandledRejection" });
       } catch {
       }
+      this.uninstallNodeErrorHandlers();
+      setTimeout(() => {
+        throw e;
+      }, 0);
     };
     process.on("uncaughtException", this.nodeUncaughtHandler);
     process.on("unhandledRejection", this.nodeRejectionHandler);
@@ -2575,6 +3005,18 @@ var AllStak = {
   clearBreadcrumbs() {
     ensureInit().clearBreadcrumbs();
   },
+  addEventProcessor(processor) {
+    ensureInit().addEventProcessor(processor);
+  },
+  addSpanProcessor(processor) {
+    ensureInit().addSpanProcessor(processor);
+  },
+  addIntegration(integration) {
+    ensureInit().addIntegration(integration);
+  },
+  getIntegration(name) {
+    return ensureInit().getIntegration(name);
+  },
   /** Phase 3 — runtime SDK-identity override (used by RN install). */
   setIdentity(identity) {
     ensureInit().setIdentity(identity);
@@ -2618,6 +3060,9 @@ var AllStak = {
   get log() {
     return ensureInit().log;
   },
+  get logger() {
+    return ensureInit().logger;
+  },
   setUser(user) {
     ensureInit().setUser(user);
   },
@@ -2643,8 +3088,9 @@ var AllStak = {
     ensureInit().setFingerprint(fingerprint);
   },
   /**
-   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   * Flush queued module batches and wait for in-flight transport work to drain.
+   * Resolves `true` if telemetry drains within `timeoutMs` (default 2000ms),
+   * `false` otherwise.
    */
   flush(timeoutMs) {
     return ensureInit().flush(timeoutMs);
@@ -2672,6 +3118,12 @@ var AllStak = {
    */
   startSpan(operation, options) {
     return ensureInit().startSpan(operation, options);
+  },
+  /**
+   * Run a sync or async function inside a span and finish it automatically.
+   */
+  trace(operation, callback, options) {
+    return ensureInit().trace(operation, callback, options);
   },
   /** Get the current trace ID (creates one if none exists). */
   getTraceId() {
@@ -2750,54 +3202,56 @@ var allstakExpress = {
       const path = pathFromRequest(req);
       const method = methodOf(req);
       const host = hostOf(req);
-      const upstreamTrace = req.headers["x-trace-id"] || req.headers["traceparent"];
-      if (upstreamTrace && typeof upstreamTrace === "string") {
-        sdk.setTraceId(upstreamTrace);
-      }
-      let rootSpan = null;
-      try {
-        rootSpan = sdk.startSpan(`${method} ${path}`, {
-          description: `HTTP ${method} ${path}`,
-          tags: {
-            "http.method": method,
-            "http.url": path,
-            "http.host": host
-          }
-        });
-      } catch {
-      }
-      const finalize = () => {
+      const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
+      sdk.withTraceContext(upstreamTrace, () => {
+        let rootSpan = null;
         try {
-          const durationMs = Date.now() - start;
-          const u = userFromRequest(req);
-          if (u) sdk.setUser(u);
-          AllStak.captureRequest({
-            direction: "inbound",
-            method,
-            host,
-            path,
-            statusCode: res.statusCode,
-            durationMs,
-            userId: u?.id,
-            timestamp: new Date(start).toISOString()
-          });
-          if (rootSpan) {
-            try {
-              rootSpan.setTag?.(
-                "http.status_code",
-                String(res.statusCode)
-              );
-              rootSpan.finish(res.statusCode >= 500 ? "error" : "ok");
-            } catch {
+          rootSpan = sdk.startSpan(`${method} ${path}`, {
+            description: `HTTP ${method} ${path}`,
+            tags: {
+              "http.method": method,
+              "http.url": path,
+              "http.host": host
             }
-          }
-          sdk.resetTrace();
+          });
         } catch {
         }
-      };
-      res.on("finish", finalize);
-      res.on("close", finalize);
-      next();
+        let finalized = false;
+        const finalize = () => {
+          if (finalized) return;
+          finalized = true;
+          try {
+            const durationMs = Date.now() - start;
+            const u = userFromRequest(req);
+            if (u) sdk.setUser(u);
+            AllStak.captureRequest({
+              direction: "inbound",
+              method,
+              host,
+              path,
+              statusCode: res.statusCode,
+              durationMs,
+              userId: u?.id,
+              timestamp: new Date(start).toISOString()
+            });
+            if (rootSpan) {
+              try {
+                rootSpan.setTag?.(
+                  "http.status_code",
+                  String(res.statusCode)
+                );
+                rootSpan.finish(res.statusCode >= 500 ? "error" : "ok");
+              } catch {
+              }
+            }
+            sdk.resetTrace();
+          } catch {
+          }
+        };
+        res.on("finish", finalize);
+        res.on("close", finalize);
+        next();
+      });
     };
   },
   /**
@@ -2824,6 +3278,15 @@ var allstakExpress = {
     };
   }
 };
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+function traceIdFromTraceparent(header) {
+  if (!header) return void 0;
+  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
+  return match?.[1];
+}
 var express_default = allstakExpress;
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

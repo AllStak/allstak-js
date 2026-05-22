@@ -1,6 +1,6 @@
 import * as React from 'react';
 export { AllStak } from './index.mjs';
-import './database-BIg-JJj9.mjs';
+import './database-DMxZg38h.mjs';
 
 /**
  * React integration for AllStak.

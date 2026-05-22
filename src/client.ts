@@ -1,15 +1,22 @@
 import { HttpTransport, TransportStats } from './transport/http';
-import { ErrorModule } from './modules/errors';
+import { ErrorModule, ErrorEventProcessor, EventFilterPattern } from './modules/errors';
 import { LogModule, LogLevel } from './modules/logs';
 import { SessionReplayModule } from './modules/session-replay';
 import { HttpRequestModule, HttpRequestItem } from './modules/http-requests';
 import { CronModule, HeartbeatOptions } from './modules/cron';
-import { TracingModule, Span } from './modules/tracing';
-import { DatabaseModule, DbQueryItem, enableDbAutoInstrumentation } from './modules/database';
+import { TracingModule, Span, SpanData, SpanFilterPattern, SpanProcessor } from './modules/tracing';
+import { DatabaseModule, DbQueryItem } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
-import { instrumentFetch, instrumentConsole, HttpBodyCaptureOptions } from './modules/auto-breadcrumbs';
-import { instrumentNodeHttp } from './modules/auto-node-http';
+import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
 import { generateId } from './utils/uuid';
+import {
+  AllStakIntegration,
+  IntegrationIndex,
+  IntegrationOption,
+  getIntegrationsToSetup,
+  setupIntegrations,
+} from './integration';
+import { getDefaultIntegrations } from './integrations/defaults';
 
 /**
  * Single, static AllStak ingest host. Not customer-configurable in normal use:
@@ -110,6 +117,39 @@ export interface AllStakConfig extends ReleaseMetadata {
    * the original event is sent so a buggy hook can't black-hole telemetry.
    */
   beforeSend?: (event: any) => any | null | undefined | Promise<any | null | undefined>;
+  /**
+   * Sentry-style event processors. Each processor can mutate an error event or
+   * return null to drop it before `beforeSend`.
+   */
+  eventProcessors?: ErrorEventProcessor[];
+  /** Drop errors whose message or exception class matches any pattern. */
+  ignoreErrors?: EventFilterPattern[];
+  /** Only send errors whose last useful stack frame URL matches one of these patterns. */
+  allowUrls?: EventFilterPattern[];
+  /** Drop errors whose last useful stack frame URL matches one of these patterns. */
+  denyUrls?: EventFilterPattern[];
+  /** Disable the built-in browser-noise ignore list. Default: false. */
+  disableDefaultIgnoreErrors?: boolean;
+  /** Drop consecutive duplicate error/message events. Default: true. */
+  dedupe?: boolean;
+  /**
+   * Mutate or drop spans before they are batched. Return null to drop.
+   */
+  beforeSendSpan?: SpanProcessor;
+  /**
+   * Drop spans matching an operation/description pattern or predicate.
+   */
+  ignoreSpans?: SpanFilterPattern[];
+  /**
+   * Default integrations. Set false to disable all built-in integrations, or
+   * provide a replacement list.
+   */
+  defaultIntegrations?: boolean | AllStakIntegration[];
+  /**
+   * Additional integrations, or a function that receives defaults and returns
+   * the final integration list.
+   */
+  integrations?: IntegrationOption;
   /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
   autoBreadcrumbs?: boolean;
   /** Enable automatic database instrumentation for pg and mysql2. Default: true */
@@ -129,6 +169,11 @@ export interface AllStakConfig extends ReleaseMetadata {
    * redaction, and truncates bodies to maxBodySize.
    */
   httpBodyCapture?: HttpBodyCaptureOptions;
+  /**
+   * Limit distributed-tracing header propagation to matching URLs.
+   * Empty/undefined means all non-AllStak ingest requests are eligible.
+   */
+  tracePropagationTargets?: TracePropagationTarget[];
   /**
    * Optional fail-open screenshot capture. The SDK never bundles a screenshot
    * library; customers provide an async provider (e.g. html2canvas wrapper)
@@ -234,6 +279,8 @@ export class AllStakClient {
   private cron: CronModule;
   private tracing: TracingModule;
   private _database: DatabaseModule;
+  private baseUrl: string;
+  private integrations: IntegrationIndex = {};
   private sessionReplay: SessionReplayModule | null = null;
   private sessionId: string;
   private scopeStack: Scope[] = [];
@@ -243,6 +290,7 @@ export class AllStakClient {
     this.config = config;
     this.sessionId = generateId();
     const { baseUrl, apiKey } = resolveTransport(config);
+    this.baseUrl = baseUrl;
     this.transport = new HttpTransport(baseUrl, apiKey);
 
     // Auto-capture unhandled errors / rejections in Node. Browser auto-capture
@@ -264,18 +312,23 @@ export class AllStakClient {
       environment: config.environment,
     });
 
-    // Auto-DB instrumentation is Node-only (requires `require()` + `process`).
-    // Skip entirely in browsers so the SDK never references `process` there.
-    if (config.autoDbInstrumentation !== false && typeof window === 'undefined') {
-      enableDbAutoInstrumentation(this._database, {
-        service: config.tags?.service,
-        environment: config.environment,
-      });
-    }
     this.tracing = new TracingModule(this.transport, {
       service: config.tags?.service,
       environment: config.environment,
+      beforeSendSpan: config.beforeSendSpan,
+      ignoreSpans: config.ignoreSpans,
     });
+
+    const defaultIntegrations = config.defaultIntegrations === undefined
+      ? getDefaultIntegrations()
+      : config.defaultIntegrations;
+    this.integrations = setupIntegrations(
+      this,
+      getIntegrationsToSetup({
+        defaultIntegrations,
+        integrations: config.integrations,
+      }),
+    );
 
     // Let DB integrations auto-populate traceId/spanId.
     setTraceResolver(() => ({
@@ -294,51 +347,18 @@ export class AllStakClient {
         this.sessionId,
       );
     }
-
-    // Wire automatic breadcrumb instrumentation
-    if (config.autoBreadcrumbs !== false) {
-      instrumentFetch(
-        (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
-        (item) => this.captureRequest({ ...item, method: item.method as HttpRequestItem['method'] }),
-        baseUrl,
-        () => ({ traceId: this.tracing.getTraceId() }),
-        config.httpBodyCapture,
-      );
-      instrumentConsole((type, msg, level, data) => this.addBreadcrumb(type, msg, level, data));
-
-      // Node-only: also patch node:http and node:https so libraries that don't
-      // go through global fetch (axios, got, node-fetch, native http) are
-      // captured as outbound HTTP requests too.
-      if (this.isNodeBuild() || typeof process !== 'undefined' && process.versions?.node) {
-        try {
-          instrumentNodeHttp(
-            (item) => this.captureRequest({ ...item, method: item.method as HttpRequestItem['method'] }),
-            (type, msg, level, data) => this.addBreadcrumb(type, msg, level, data),
-            baseUrl,
-          );
-        } catch {
-          /* not in Node — ignore */
-        }
-      }
-
-      this.logs.setOnLogBreadcrumb((level, message) => {
-        const bcLevel = level === 'warn' ? 'warn' : 'error';
-        this.addBreadcrumb('log', message, bcLevel, { logLevel: level });
-      });
-
-      this.httpRequests.setOnCapture((item) => {
-        this.addBreadcrumb(
-          'http',
-          `${item.method} ${item.path} -> ${item.statusCode}`,
-          item.statusCode >= 400 ? 'error' : 'info',
-          { method: item.method, path: item.path, statusCode: item.statusCode, durationMs: item.durationMs },
-        );
-      });
-    }
   }
 
   private isNodeBuild(): boolean {
     return typeof globalThis.__ALLSTAK_NODE__ !== 'undefined';
+  }
+
+  isNodeRuntime(): boolean {
+    return this.isNodeBuild() || (typeof process !== 'undefined' && !!process.versions?.node);
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   captureException(error: Error, context?: Record<string, unknown>): void {
@@ -420,6 +440,44 @@ export class AllStakClient {
 
   clearBreadcrumbs(): void {
     this.errors.clearBreadcrumbs();
+  }
+
+  addEventProcessor(processor: ErrorEventProcessor): void {
+    this.errors.addEventProcessor(processor);
+  }
+
+  addSpanProcessor(processor: SpanProcessor): void {
+    this.tracing.addSpanProcessor(processor);
+  }
+
+  onLogBreadcrumb(callback: Parameters<LogModule['setOnLogBreadcrumb']>[0]): void {
+    this.logs.setOnLogBreadcrumb(callback);
+  }
+
+  onHttpRequestCaptured(callback: Parameters<HttpRequestModule['setOnCapture']>[0]): void {
+    this.httpRequests.setOnCapture(callback);
+  }
+
+  addIntegration(integration: AllStakIntegration): void {
+    const existing = this.integrations[integration.name];
+    if (existing) return;
+    this.integrations[integration.name] = integration;
+    integration.setupOnce?.();
+    integration.setup?.(this);
+    if (integration.processEvent) {
+      this.addEventProcessor((event) => integration.processEvent!(event, this));
+    }
+    if (integration.processSpan) {
+      this.addSpanProcessor((span) => integration.processSpan!(span, this));
+    }
+  }
+
+  getIntegration(name: string): AllStakIntegration | undefined {
+    return this.integrations[name];
+  }
+
+  getOptions(): AllStakConfig {
+    return this.config;
   }
 
   /**
@@ -515,6 +573,10 @@ export class AllStakClient {
     };
   }
 
+  get logger() {
+    return this.log;
+  }
+
   setUser(user: { id?: string; email?: string }): void {
     this.config.user = user;
   }
@@ -567,16 +629,16 @@ export class AllStakClient {
   }
 
   /**
-   * Wait for the in-flight retry-buffer to drain. Resolves `true` if the
-   * buffer empties within `timeoutMs` (default 2000ms), `false` otherwise.
+   * Flush queued module batches and wait for in-flight transport work to
+   * finish. Resolves `true` when telemetry drains within `timeoutMs`
+   * (default 2000ms), `false` otherwise.
    */
   async flush(timeoutMs = 2000): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (this.transport.getBufferSize() > 0) {
-      if (Date.now() >= deadline) return false;
-      await new Promise((r) => setTimeout(r, 25));
-    }
-    return true;
+    this.httpRequests.flush();
+    this._database.flush();
+    this.tracing.flush();
+    this.sessionReplay?.flush();
+    return this.transport.flush(timeoutMs);
   }
 
   /**
@@ -613,6 +675,52 @@ export class AllStakClient {
     options?: { description?: string; tags?: Record<string, string> },
   ): Span {
     return this.tracing.startSpan(operation, options);
+  }
+
+  /**
+   * Sentry-style helper: creates a span, runs the callback, then finishes the
+   * span automatically. Async callbacks are supported, and thrown/rejected
+   * errors mark the span as failed before being rethrown.
+   */
+  trace<T>(
+    operation: string,
+    callback: (span: Span) => T,
+    options?: { description?: string; tags?: Record<string, string> },
+  ): T {
+    const span = this.tracing.startSpan(operation, options);
+    let finished = false;
+    const finish = (status: 'ok' | 'error') => {
+      if (!finished) {
+        finished = true;
+        span.finish(status);
+      }
+    };
+
+    try {
+      const result = callback(span);
+      if (result && typeof (result as any).then === 'function') {
+        return (result as any).then(
+          (value: any) => {
+            finish('ok');
+            return value;
+          },
+          (error: any) => {
+            finish('error');
+            throw error;
+          },
+        );
+      }
+      finish('ok');
+      return result;
+    } catch (error) {
+      finish('error');
+      throw error;
+    }
+  }
+
+  /** @internal Used by server framework integrations to isolate request tracing. */
+  withTraceContext<T>(traceId: string | undefined, callback: () => T): T {
+    return this.tracing.withTraceContext(traceId, callback);
   }
 
   /** Get the current trace ID (creates one if none exists). */
@@ -698,20 +806,26 @@ export class AllStakClient {
       return;
     }
     this.nodeUncaughtHandler = (err: Error) => {
+      const e = err instanceof Error ? err : new Error(String(err));
       try {
-        const e = err instanceof Error ? err : new Error(String(err));
         this.errors.captureException(e, { source: 'uncaughtException' });
       } catch {
         /* never break the host process */
       }
+      this.uninstallNodeErrorHandlers();
+      throw e;
     };
     this.nodeRejectionHandler = (reason: unknown) => {
+      const e = reason instanceof Error ? reason : new Error(String(reason));
       try {
-        const e = reason instanceof Error ? reason : new Error(String(reason));
         this.errors.captureException(e, { source: 'unhandledRejection' });
       } catch {
         /* never break the host process */
       }
+      this.uninstallNodeErrorHandlers();
+      setTimeout(() => {
+        throw e;
+      }, 0);
     };
     process.on('uncaughtException', this.nodeUncaughtHandler);
     process.on('unhandledRejection', this.nodeRejectionHandler);

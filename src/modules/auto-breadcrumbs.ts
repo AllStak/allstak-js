@@ -35,6 +35,8 @@ type CaptureRequestFn = (item: {
 
 type TraceContextFn = () => { traceId?: string; requestId?: string } | undefined;
 
+export type TracePropagationTarget = string | RegExp;
+
 export interface HttpBodyCaptureOptions {
   enabled?: boolean;
   maxBodySize?: number;
@@ -54,6 +56,7 @@ export function instrumentFetch(
   ownBaseUrl?: string,
   traceContext?: TraceContextFn,
   bodyCapture?: HttpBodyCaptureOptions,
+  tracePropagationTargets?: TracePropagationTarget[],
 ): void {
   if (typeof globalThis.fetch !== 'function') return;
 
@@ -77,8 +80,9 @@ export function instrumentFetch(
     const correlation = !isOwnIngest ? traceContext?.() : undefined;
     const requestId = correlation?.requestId ?? generateRequestId();
     const traceId = correlation?.traceId;
-    const propagatedInit = !isOwnIngest && traceId
-      ? withTraceHeaders(init, traceId, requestId)
+    const shouldPropagate = !isOwnIngest && traceId && targetMatches(url, tracePropagationTargets);
+    const propagatedInit = shouldPropagate
+      ? withTraceHeaders(input, init, traceId, requestId)
       : init;
 
     let host = '';
@@ -292,15 +296,67 @@ function generateRequestId(): string {
   });
 }
 
-function withTraceHeaders(init: RequestInit | undefined, traceId: string, requestId: string): RequestInit {
+function targetMatches(url: string, targets?: TracePropagationTarget[]): boolean {
+  if (!targets || targets.length === 0) return true;
+  return targets.some((target) => typeof target === 'string' ? url.includes(target) : target.test(url));
+}
+
+function withTraceHeaders(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  traceId: string,
+  requestId: string,
+): RequestInit {
   const next: RequestInit = { ...(init ?? {}) };
-  const headers = new Headers(init?.headers ?? {});
+  const headers = new Headers(init?.headers ?? requestHeadersFromInput(input));
   const spanId = requestId.replace(/-/g, '').slice(0, 16).padEnd(16, '0');
-  headers.set('traceparent', `00-${traceId.replace(/-/g, '').slice(0, 32).padEnd(32, '0')}-${spanId}-01`);
-  headers.set('x-allstak-trace-id', traceId);
-  headers.set('x-allstak-request-id', requestId);
+  const traceparent = `00-${normalizeTraceId(traceId)}-${normalizeSpanId(spanId)}-01`;
+  const baggage = [
+    `allstak-trace_id=${encodeURIComponent(traceId)}`,
+    `allstak-span_id=${encodeURIComponent(spanId)}`,
+    `allstak-request_id=${encodeURIComponent(requestId)}`,
+  ].join(',');
+
+  setHeaderIfMissing(headers, 'traceparent', traceparent);
+  setHeaderIfMissing(headers, 'allstak-trace', `${traceId}-${spanId}-1`);
+  mergeAllStakBaggage(headers, baggage);
+  setHeaderIfMissing(headers, 'x-allstak-trace-id', traceId);
+  setHeaderIfMissing(headers, 'x-allstak-request-id', requestId);
   next.headers = headers;
   return next;
+}
+
+function requestHeadersFromInput(input: RequestInfo | URL): HeadersInit | undefined {
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.headers;
+  return undefined;
+}
+
+function setHeaderIfMissing(headers: Headers, key: string, value: string): void {
+  if (!headers.has(key)) headers.set(key, value);
+}
+
+function mergeAllStakBaggage(headers: Headers, baggage: string): void {
+  const allstakBaggage = headers.get('allstak-baggage');
+  if (!allstakBaggage) {
+    headers.set('allstak-baggage', baggage);
+  } else if (!allstakBaggage.includes('allstak-trace_id=')) {
+    headers.set('allstak-baggage', `${allstakBaggage},${baggage}`);
+  }
+
+  const standardBaggage = headers.get('baggage');
+  if (!standardBaggage) {
+    headers.set('baggage', baggage);
+  } else if (!standardBaggage.includes('allstak-trace_id=')) {
+    headers.set('baggage', `${standardBaggage},${baggage}`);
+  }
+}
+
+function normalizeTraceId(traceId: string): string {
+  return traceId.replace(/-/g, '').slice(0, 32).padEnd(32, '0');
+}
+
+function normalizeSpanId(spanId: string): string {
+  return spanId.replace(/-/g, '').slice(0, 16).padEnd(16, '0');
 }
 
 /**
