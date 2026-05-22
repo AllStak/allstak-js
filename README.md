@@ -1,39 +1,30 @@
 # @allstak/js
 
-**Track errors, logs, HTTP calls, and cron jobs in your Node.js app in under 30 seconds.**
+Official AllStak JavaScript SDK for Node.js, Express, browser apps, React, Vite, and Next.js.
 
-[![npm version](https://img.shields.io/npm/v/@allstak/js.svg)](https://www.npmjs.com/package/@allstak/js)
-[![CI](https://github.com/AllStak/allstak-js/actions/workflows/ci.yml/badge.svg)](https://github.com/AllStak/allstak-js/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+It captures errors, structured logs, inbound and outbound HTTP requests, request and response metadata, distributed traces, spans, database queries, source maps, and cron heartbeats.
 
-Official AllStak SDK for Node.js — captures errors, structured logs, inbound/outbound HTTP, database queries, distributed traces, and cron heartbeats.
-
-## Dashboard
-
-View captured events live at [app.allstak.sa](https://app.allstak.sa).
-
-![AllStak dashboard](https://app.allstak.sa/images/dashboard-preview.png)
-
-## Features
-
-- Uncaught exception and unhandled-rejection capture
-- Structured logs with levels (`debug`, `info`, `warning`, `error`, `fatal`)
-- HTTP request telemetry (inbound + outbound) with auto `fetch` instrumentation
-- Database query capture for `pg` and `mysql2` (auto-instrumented)
-- Distributed tracing with spans and automatic parenting
-- Cron heartbeat monitoring
-- Breadcrumbs ring buffer with auto-capture from `console` and `fetch`
-- Express middleware entry point at `@allstak/js/express`
-
-## Installation
+## Install
 
 ```bash
 npm install @allstak/js
 ```
 
-## Quick Start
+Production ingest is used by default:
 
-> Create a project at [app.allstak.sa](https://app.allstak.sa) to get your API key.
+```text
+https://api.allstak.sa
+```
+
+Create a project in [app.allstak.sa](https://app.allstak.sa), copy the project API key, and expose it as an environment variable:
+
+```bash
+export ALLSTAK_API_KEY=ask_live_xxx
+```
+
+## Node.js
+
+Use this for scripts, workers, queues, CLIs, and any plain Node.js service.
 
 ```ts
 import { AllStak } from '@allstak/js';
@@ -41,70 +32,161 @@ import { AllStak } from '@allstak/js';
 AllStak.init({
   apiKey: process.env.ALLSTAK_API_KEY!,
   environment: 'production',
-  release: 'myapp@1.0.0',
+  release: 'my-service@1.0.0',
+  tags: {
+    service: 'my-service',
+  },
 });
 
-AllStak.captureException(new Error('test: hello from allstak-js'));
+AllStak.logger.info('worker started');
+
+await AllStak.trace('jobs.send-email', async () => {
+  // your work here
+});
+
+try {
+  throw new Error('example failure');
+} catch (error) {
+  AllStak.captureException(error as Error);
+}
+
+await AllStak.flush();
 ```
 
-Run the file — the test error appears in your dashboard within seconds.
+## Express
 
-## Get Your API Key
-
-1. Sign up at [app.allstak.sa](https://app.allstak.sa)
-2. Create a project
-3. Copy your API key from **Project Settings → API Keys**
-4. Export it as `ALLSTAK_API_KEY` or pass it to `AllStak.init(...)`
-
-## Configuration
-
-| Option | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `apiKey` | `string` | yes | — | Project API key (`ask_live_…`) |
-| `environment` | `string` | no | — | Deployment env (`production`, `staging`) |
-| `release` | `string` | no | — | Version or git SHA |
-| `host` | `string` | no | `https://api.allstak.sa` | Ingest host override (self-hosted only) |
-| `user` | `{ id?, email? }` | no | — | Default user context |
-| `tags` | `Record<string,string>` | no | — | Default tags attached to events |
-| `autoBreadcrumbs` | `boolean` | no | `true` | Auto-capture fetch/console breadcrumbs |
-| `autoDbInstrumentation` | `boolean` | no | `true` | Auto-wrap `pg` and `mysql2` |
-| `autoNodeErrorCapture` | `boolean` | no | `true` | Hook `uncaughtException` / `unhandledRejection` |
-| `maxBreadcrumbs` | `number` | no | `50` | Ring buffer size |
-
-## Example Usage
-
-Capture an exception with context:
+Mount the request handler before routes and the error handler after routes.
 
 ```ts
-AllStak.captureException(new Error('Payment failed'), { orderId: 'ORD-42' });
+import express from 'express';
+import { AllStak } from '@allstak/js';
+import { allstakExpress } from '@allstak/js/express';
+
+AllStak.init({
+  apiKey: process.env.ALLSTAK_API_KEY!,
+  environment: 'production',
+  release: 'api@1.0.0',
+  tags: {
+    service: 'api',
+  },
+  httpBodyCapture: {
+    request: true,
+    response: true,
+  },
+});
+
+const app = express();
+
+app.use(express.json());
+app.use(allstakExpress.requestHandler());
+
+app.get('/health', (_req, res) => {
+  AllStak.logger.info('health checked');
+  res.json({ ok: true });
+});
+
+app.post('/checkout', async (_req, res) => {
+  await AllStak.trace('payments.authorize', async () => {
+    AllStak.logger.info('authorizing payment');
+  });
+
+  res.status(201).json({ status: 'created' });
+});
+
+app.get('/boom', () => {
+  throw new Error('checkout failed');
+});
+
+app.use(allstakExpress.errorHandler());
+
+app.listen(3000);
 ```
 
-Send a structured log:
+This automatically links the request, root span, logs, and captured errors through the same trace and request IDs.
+
+## Browser
+
+Use this in a plain browser app.
+
+```html
+<script type="module">
+  import { AllStak } from 'https://esm.sh/@allstak/js/browser';
+
+  AllStak.init({
+    apiKey: 'ask_live_xxx',
+    environment: 'production',
+    release: 'web@1.0.0',
+    tracePropagationTargets: [/^https:\/\/api\.allstak\.sa/, /^https:\/\/api\.example\.com/],
+  });
+
+  AllStak.logger.info('browser app loaded');
+
+  try {
+    throw new Error('browser smoke error');
+  } catch (error) {
+    AllStak.captureException(error);
+  }
+
+  await AllStak.flush();
+</script>
+```
+
+For production web apps, prefer loading the package through your bundler instead of a CDN URL.
+
+## React
+
+Wrap your app with `AllStakErrorBoundary` and initialize once at startup.
+
+```tsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { AllStak } from '@allstak/js/browser';
+import { AllStakErrorBoundary } from '@allstak/js/react';
+import App from './App';
+
+AllStak.init({
+  apiKey: import.meta.env.VITE_ALLSTAK_API_KEY,
+  environment: import.meta.env.MODE,
+  release: import.meta.env.VITE_RELEASE,
+  tracePropagationTargets: [/^https:\/\/api\.example\.com/],
+});
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <AllStakErrorBoundary fallback={<div>Something went wrong.</div>}>
+    <App />
+  </AllStakErrorBoundary>,
+);
+```
+
+Optional render profiling:
+
+```tsx
+import { withAllStakProfiler } from '@allstak/js/react';
+
+export default withAllStakProfiler(App, { name: 'App' });
+```
+
+## Vite
+
+Use the browser SDK at runtime and the Vite plugin for source maps.
+
+```bash
+npm install @allstak/js
+```
 
 ```ts
-AllStak.captureMessage('User signed up', 'info');
+// src/allstak.ts
+import { AllStak } from '@allstak/js/browser';
+
+AllStak.init({
+  apiKey: import.meta.env.VITE_ALLSTAK_API_KEY,
+  environment: import.meta.env.MODE,
+  release: import.meta.env.VITE_RELEASE,
+  tracePropagationTargets: [/^https:\/\/api\.example\.com/],
+});
+
+export { AllStak };
 ```
-
-Set user and tags:
-
-```ts
-AllStak.setUser({ id: 'u_123', email: 'alice@example.com' });
-AllStak.setTag('region', 'eu-west-1');
-```
-
-Send a cron heartbeat:
-
-```ts
-AllStak.heartbeat({ slug: 'daily-report', status: 'ok', durationMs: 1234 });
-```
-
-## Source Maps
-
-The SDK ships build-tool plugins that inject a **debug ID** into each bundle
-and its corresponding `.map` file, then upload the source map to AllStak.
-No separate CLI is required.
-
-### Vite
 
 ```ts
 // vite.config.ts
@@ -116,16 +198,20 @@ export default defineConfig({
   plugins: [
     react(),
     allstakVitePlugin({
-      release: process.env.RELEASE ?? 'web@1.0.0',
+      release: process.env.VITE_RELEASE ?? process.env.RELEASE ?? 'web@1.0.0',
       token: process.env.ALLSTAK_UPLOAD_TOKEN,
       dist: 'web',
     }),
   ],
-  build: { sourcemap: true },
+  build: {
+    sourcemap: true,
+  },
 });
 ```
 
-### Next.js source-map helper
+## Next.js
+
+Use the browser SDK in client components and the Next helper for browser source maps.
 
 ```js
 // next.config.js
@@ -133,55 +219,110 @@ const { withAllStak } = require('@allstak/js/next');
 
 module.exports = withAllStak(
   {
-    release: process.env.RELEASE ?? 'web@1.0.0',
+    release: process.env.NEXT_PUBLIC_RELEASE ?? process.env.RELEASE ?? 'web@1.0.0',
     token: process.env.ALLSTAK_UPLOAD_TOKEN,
     dist: 'web',
   },
   {
-    // your existing Next config
+    reactStrictMode: true,
   },
 );
 ```
 
-For the Stable Next.js runtime integration, install `@allstak/next`. The
-`@allstak/js/next` export remains a build-time source-map helper for existing
-projects and should not be presented as the primary Next.js runtime SDK.
+```tsx
+// app/allstak-client.tsx
+'use client';
 
-### Webpack
+import { useEffect } from 'react';
+import { AllStak } from '@allstak/js/browser';
 
-```js
-// webpack.config.js
-const { AllStakWebpackPlugin } = require('@allstak/js/webpack');
+export function AllStakClient() {
+  useEffect(() => {
+    AllStak.init({
+      apiKey: process.env.NEXT_PUBLIC_ALLSTAK_API_KEY!,
+      environment: process.env.NODE_ENV,
+      release: process.env.NEXT_PUBLIC_RELEASE,
+      tracePropagationTargets: [/^https:\/\/api\.example\.com/],
+    });
+  }, []);
 
-module.exports = {
-  devtool: 'source-map',
-  plugins: [
-    new AllStakWebpackPlugin({
-      release: process.env.RELEASE ?? 'web@1.0.0',
-      token: process.env.ALLSTAK_UPLOAD_TOKEN,
-      dist: 'web',
-    }),
-  ],
-};
+  return null;
+}
 ```
 
-### What the plugin does
+Add `<AllStakClient />` once in your root layout.
 
-For every `.js` + `.js.map` pair in the build output it:
+## Logs
 
-1. Generates a stable per-bundle UUID (reused across rebuilds — idempotent).
-2. Appends `//# debugId=<uuid>` to the bundle and writes the same UUID
-   into the source map's top-level `debugId` field.
-3. Inlines a tiny self-registration snippet so the bundle, when
-   executed in the browser, populates `globalThis._allstakDebugIds` —
-   the SDK's runtime resolver reads from that map to attach the right
-   debug ID to each stack frame.
-4. Uploads the source map (and optionally the bundle) to AllStak via
-   `POST /api/v1/artifacts/upload`. Skipped automatically when
-   `token` is empty so the same config works in local dev.
+```ts
+AllStak.logger.debug('debug detail');
+AllStak.logger.info('order created', { orderId: 'ord_123' });
+AllStak.logger.warn('payment retrying');
+AllStak.logger.error('payment failed');
+AllStak.logger.fatal('worker cannot continue');
+```
 
-If you need finer control (custom build tool, monorepo orchestration),
-the underlying API is exported from `@allstak/js/sourcemaps`:
+Logs created inside an Express request or active trace are automatically linked to the current request and span.
+
+## Traces And Spans
+
+```ts
+await AllStak.trace('checkout.submit', async () => {
+  const span = AllStak.startSpan('payments.authorize', {
+    op: 'payments.authorize',
+    attributes: {
+      provider: 'primary',
+    },
+  });
+
+  try {
+    // call provider
+    span.finish('ok');
+  } catch (error) {
+    span.finish('error');
+    throw error;
+  }
+});
+```
+
+## Cron Heartbeats
+
+```ts
+await AllStak.heartbeat({
+  slug: 'nightly-billing-sync',
+  status: 'ok',
+  durationMs: 1234,
+});
+```
+
+## Configuration
+
+| Option | Type | Required | Default | Description |
+|---|---:|:---:|---|---|
+| `apiKey` | `string` | yes | - | Project API key. |
+| `environment` | `string` | no | auto | Deployment environment. |
+| `release` | `string` | no | auto | App version, build ID, or git SHA. |
+| `host` | `string` | no | `https://api.allstak.sa` | Ingest host override for self-hosted deployments. |
+| `user` | `{ id?, email? }` | no | - | Default user context. |
+| `tags` | `Record<string,string>` | no | - | Default tags on every event. |
+| `autoBreadcrumbs` | `boolean` | no | `true` | Capture console and fetch breadcrumbs. |
+| `autoDbInstrumentation` | `boolean` | no | `true` | Auto-instrument supported DB clients. |
+| `autoNodeErrorCapture` | `boolean` | no | `true` | Capture uncaught exceptions and unhandled rejections in Node.js. |
+| `httpBodyCapture` | `object` | no | off | Capture request and response bodies where supported. |
+| `tracePropagationTargets` | `(string \\| RegExp)[]` | no | `[]` | Targets that should receive trace headers from browser fetch calls. |
+| `maxBreadcrumbs` | `number` | no | `50` | Breadcrumb ring buffer size. |
+
+## Source Maps
+
+The Vite, Webpack, and Next helpers inject a debug ID into each browser bundle and matching `.map` file, then upload the source map to AllStak.
+
+Required environment variable:
+
+```bash
+export ALLSTAK_UPLOAD_TOKEN=ast_upload_xxx
+```
+
+Manual source-map processing is also available:
 
 ```ts
 import { processBuildOutput } from '@allstak/js/sourcemaps';
@@ -194,12 +335,42 @@ await processBuildOutput({
 });
 ```
 
-## Production Endpoint
+## Verify Locally
 
-Production endpoint: `https://api.allstak.sa`. To point at a self-hosted deployment, pass `host`:
+```bash
+node -e "import('@allstak/js').then(async ({ AllStak }) => { AllStak.init({ apiKey: process.env.ALLSTAK_API_KEY, release: 'readme-smoke' }); AllStak.logger.info('readme smoke'); AllStak.captureException(new Error('readme smoke error')); console.log(await AllStak.flush()); })"
+```
 
-```ts
-AllStak.init({ apiKey: '...', host: 'https://allstak.mycorp.com' });
+The event should appear in the dashboard within seconds.
+
+## Publish
+
+Before publishing, make sure npm is logged in with permission to publish `@allstak/js`:
+
+```bash
+npm whoami
+```
+
+One-command patch release:
+
+```bash
+pnpm run release:patch
+```
+
+That command:
+
+1. Bumps the patch version in `package.json`.
+2. Cleans `dist`.
+3. Runs TypeScript checks.
+4. Runs tests.
+5. Builds the package.
+6. Runs `npm pack --dry-run`.
+7. Publishes to npm with public access.
+
+To publish the current version without bumping:
+
+```bash
+pnpm run release:publish
 ```
 
 ## Links
@@ -210,4 +381,4 @@ AllStak.init({ apiKey: '...', host: 'https://allstak.mycorp.com' });
 
 ## License
 
-MIT © AllStak
+MIT (c) AllStak

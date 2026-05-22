@@ -56,7 +56,19 @@ async function captureOutboundFetch(
     ([u]: [string]) => typeof u === 'string' && u.includes('/ingest/v1/http-requests'),
   );
   const body = JSON.parse(ingestCall![1].body as string);
-  return body.requests[0];
+  const request = body.requests[0];
+  request.requestHeaders = parseHeaderPayload(request.requestHeaders);
+  request.responseHeaders = parseHeaderPayload(request.responseHeaders);
+  return request;
+}
+
+function parseHeaderPayload(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'string') return value as Record<string, string> | undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
