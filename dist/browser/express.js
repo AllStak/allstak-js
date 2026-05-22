@@ -1223,12 +1223,27 @@ var Span = class {
     this._service = config.service;
     this._environment = config.environment;
     this._tags = { ...config.tags };
+    this._attributes = { ...config.attributes };
+    this._measurements = { ...config.measurements };
+    this._op = config.op;
+    this._platform = config.platform;
     this._startTimeMillis = config.startTimeMillis;
     this._onFinish = config.onFinish;
   }
   /** Set a tag on this span. */
   setTag(key, value) {
     this._tags[key] = value;
+    this._attributes[key] = value;
+    return this;
+  }
+  /** Set a queryable span attribute. */
+  setAttribute(key, value) {
+    this._attributes[key] = value;
+    return this;
+  }
+  /** Set a numeric span measurement. */
+  setMeasurement(key, value) {
+    this._measurements[key] = value;
     return this;
   }
   /** Set arbitrary string data on this span. */
@@ -1249,6 +1264,7 @@ var Span = class {
     if (this._finished) return;
     this._finished = true;
     const endTimeMillis = Date.now();
+    const durationMs = endTimeMillis - this._startTimeMillis;
     this._onFinish({
       traceId: this._traceId,
       spanId: this._spanId,
@@ -1256,13 +1272,23 @@ var Span = class {
       operation: this._operation,
       description: this._description,
       status,
-      durationMs: endTimeMillis - this._startTimeMillis,
+      durationMs,
       startTimeMillis: this._startTimeMillis,
       endTimeMillis,
       service: this._service,
       environment: this._environment,
       tags: this._tags,
-      data: this._data
+      data: this._data,
+      op: this._op || inferOp(this._operation),
+      platform: this._platform,
+      measurements: {
+        duration_ms: durationMs,
+        ...this._measurements
+      },
+      attributes: {
+        ...this._tags,
+        ...this._attributes
+      }
     });
   }
   get spanId() {
@@ -1285,6 +1311,7 @@ var TracingModule = class {
     this.transport = transport;
     this.service = config.service || "";
     this.environment = config.environment || "";
+    this.platform = config.platform || "";
     this.beforeSendSpan = config.beforeSendSpan;
     this.ignoreSpans = config.ignoreSpans ?? [];
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS3);
@@ -1350,6 +1377,10 @@ var TracingModule = class {
       service: this.service,
       environment: this.environment,
       tags: options?.tags || {},
+      attributes: options?.attributes || {},
+      measurements: options?.measurements || {},
+      op: options?.op || inferOp(operation),
+      platform: options?.platform || this.platform,
       startTimeMillis: Date.now(),
       onFinish: (spanData) => {
         const idx = state.spanStack.indexOf(spanId);
@@ -1422,6 +1453,14 @@ function createAsyncTraceStorage() {
   } catch {
     return null;
   }
+}
+function inferOp(operation) {
+  const trimmed = operation.trim();
+  const methodMatch = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/i.exec(trimmed);
+  if (methodMatch) return "http.server";
+  if (trimmed.startsWith("db.") || trimmed.includes(".query")) return "db";
+  if (trimmed.startsWith("http.") || trimmed.includes("fetch") || trimmed.includes("request")) return "http.client";
+  return trimmed.includes(".") ? trimmed.split(".")[0] || trimmed : "custom";
 }
 
 // src/integrations/db/shared.ts
@@ -2661,6 +2700,7 @@ var AllStakClient = class {
     this.tracing = new TracingModule(this.transport, {
       service: config.tags?.service,
       environment: config.environment,
+      platform: config.platform,
       beforeSendSpan: config.beforeSendSpan,
       ignoreSpans: config.ignoreSpans
     });
@@ -3387,11 +3427,21 @@ var allstakExpress = {
         try {
           rootSpan = sdk.startSpan(`${method} ${path}`, {
             description: `HTTP ${method} ${path}`,
+            op: "http.server",
+            platform: "node",
             tags: {
               "http.method": method,
               "http.url": path,
               "http.host": host,
               "http.request_id": requestId
+            },
+            attributes: {
+              "http.method": method,
+              "http.route": route || path,
+              "http.target": path,
+              "http.host": host,
+              "http.request_id": requestId,
+              "allstak.request_id": requestId
             }
           });
         } catch {

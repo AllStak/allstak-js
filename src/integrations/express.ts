@@ -161,11 +161,21 @@ export const allstakExpress = {
         try {
           rootSpan = sdk.startSpan(`${method} ${path}`, {
             description: `HTTP ${method} ${path}`,
+            op: 'http.server',
+            platform: 'node',
             tags: {
               'http.method': method,
               'http.url': path,
               'http.host': host,
               'http.request_id': requestId,
+            },
+            attributes: {
+              'http.method': method,
+              'http.route': route || path,
+              'http.target': path,
+              'http.host': host,
+              'http.request_id': requestId,
+              'allstak.request_id': requestId,
             },
           });
         } catch {

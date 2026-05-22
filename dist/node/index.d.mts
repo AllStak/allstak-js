@@ -196,6 +196,18 @@ interface SpanData {
     environment: string;
     tags: Record<string, string>;
     data: string;
+    op?: string;
+    platform?: string;
+    measurements?: Record<string, number>;
+    attributes?: Record<string, string>;
+}
+interface SpanOptions {
+    description?: string;
+    tags?: Record<string, string>;
+    attributes?: Record<string, string>;
+    measurements?: Record<string, number>;
+    op?: string;
+    platform?: string;
 }
 type SpanProcessor = (span: SpanData) => SpanData | null | undefined;
 type SpanFilterPattern = string | RegExp | ((span: SpanData) => boolean);
@@ -211,6 +223,10 @@ declare class Span {
     private _service;
     private _environment;
     private _tags;
+    private _attributes;
+    private _measurements;
+    private _op?;
+    private _platform?;
     private _data;
     private _startTimeMillis;
     private _finished;
@@ -224,11 +240,19 @@ declare class Span {
         service: string;
         environment: string;
         tags: Record<string, string>;
+        attributes: Record<string, string>;
+        measurements: Record<string, number>;
+        op?: string;
+        platform?: string;
         startTimeMillis: number;
         onFinish: (spanData: SpanData) => void;
     });
     /** Set a tag on this span. */
     setTag(key: string, value: string): this;
+    /** Set a queryable span attribute. */
+    setAttribute(key: string, value: string): this;
+    /** Set a numeric span measurement. */
+    setMeasurement(key: string, value: number): this;
     /** Set arbitrary string data on this span. */
     setData(data: string): this;
     /** Set the description after creation. */
@@ -588,19 +612,13 @@ declare class AllStakClient {
      * Start a new span. Automatically parented to the current active span.
      * Call `span.finish()` when the operation completes.
      */
-    startSpan(operation: string, options?: {
-        description?: string;
-        tags?: Record<string, string>;
-    }): Span;
+    startSpan(operation: string, options?: SpanOptions): Span;
     /**
      * AllStak-style helper: creates a span, runs the callback, then finishes the
      * span automatically. Async callbacks are supported, and thrown/rejected
      * errors mark the span as failed before being rethrown.
      */
-    trace<T>(operation: string, callback: (span: Span) => T, options?: {
-        description?: string;
-        tags?: Record<string, string>;
-    }): T;
+    trace<T>(operation: string, callback: (span: Span) => T, options?: SpanOptions): T;
     /** @internal Used by server framework integrations to isolate request tracing. */
     withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
     withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
@@ -765,17 +783,11 @@ declare const AllStak: {
      * Start a new span. Automatically parented to the current active span.
      * Call `span.finish()` when the operation completes.
      */
-    startSpan(operation: string, options?: {
-        description?: string;
-        tags?: Record<string, string>;
-    }): Span;
+    startSpan(operation: string, options?: SpanOptions): Span;
     /**
      * Run a sync or async function inside a span and finish it automatically.
      */
-    trace<T>(operation: string, callback: (span: Span) => T, options?: {
-        description?: string;
-        tags?: Record<string, string>;
-    }): T;
+    trace<T>(operation: string, callback: (span: Span) => T, options?: SpanOptions): T;
     /** Get the current trace ID (creates one if none exists). */
     getTraceId(): string;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
@@ -789,4 +801,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanProcessor, TransportStats, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, TransportStats, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration };

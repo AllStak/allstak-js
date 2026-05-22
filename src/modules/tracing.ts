@@ -15,6 +15,19 @@ export interface SpanData {
   environment: string;
   tags: Record<string, string>;
   data: string;
+  op?: string;
+  platform?: string;
+  measurements?: Record<string, number>;
+  attributes?: Record<string, string>;
+}
+
+export interface SpanOptions {
+  description?: string;
+  tags?: Record<string, string>;
+  attributes?: Record<string, string>;
+  measurements?: Record<string, number>;
+  op?: string;
+  platform?: string;
 }
 
 export type SpanProcessor = (span: SpanData) => SpanData | null | undefined;
@@ -55,6 +68,10 @@ export class Span {
   private _service: string;
   private _environment: string;
   private _tags: Record<string, string>;
+  private _attributes: Record<string, string>;
+  private _measurements: Record<string, number>;
+  private _op?: string;
+  private _platform?: string;
   private _data: string = '';
   private _startTimeMillis: number;
   private _finished = false;
@@ -69,6 +86,10 @@ export class Span {
     service: string;
     environment: string;
     tags: Record<string, string>;
+    attributes: Record<string, string>;
+    measurements: Record<string, number>;
+    op?: string;
+    platform?: string;
     startTimeMillis: number;
     onFinish: (spanData: SpanData) => void;
   }) {
@@ -80,6 +101,10 @@ export class Span {
     this._service = config.service;
     this._environment = config.environment;
     this._tags = { ...config.tags };
+    this._attributes = { ...config.attributes };
+    this._measurements = { ...config.measurements };
+    this._op = config.op;
+    this._platform = config.platform;
     this._startTimeMillis = config.startTimeMillis;
     this._onFinish = config.onFinish;
   }
@@ -87,6 +112,19 @@ export class Span {
   /** Set a tag on this span. */
   setTag(key: string, value: string): this {
     this._tags[key] = value;
+    this._attributes[key] = value;
+    return this;
+  }
+
+  /** Set a queryable span attribute. */
+  setAttribute(key: string, value: string): this {
+    this._attributes[key] = value;
+    return this;
+  }
+
+  /** Set a numeric span measurement. */
+  setMeasurement(key: string, value: number): this {
+    this._measurements[key] = value;
     return this;
   }
 
@@ -110,6 +148,7 @@ export class Span {
     if (this._finished) return;
     this._finished = true;
     const endTimeMillis = Date.now();
+    const durationMs = endTimeMillis - this._startTimeMillis;
     this._onFinish({
       traceId: this._traceId,
       spanId: this._spanId,
@@ -117,13 +156,23 @@ export class Span {
       operation: this._operation,
       description: this._description,
       status,
-      durationMs: endTimeMillis - this._startTimeMillis,
+      durationMs,
       startTimeMillis: this._startTimeMillis,
       endTimeMillis,
       service: this._service,
       environment: this._environment,
       tags: this._tags,
       data: this._data,
+      op: this._op || inferOp(this._operation),
+      platform: this._platform,
+      measurements: {
+        duration_ms: durationMs,
+        ...this._measurements,
+      },
+      attributes: {
+        ...this._tags,
+        ...this._attributes,
+      },
     });
   }
 
@@ -144,6 +193,7 @@ export class TracingModule {
   private transport: HttpTransport;
   private service: string;
   private environment: string;
+  private platform: string;
   private globalState: TraceState = { traceId: null, spanStack: [] };
   private asyncStorage: AsyncTraceStorage | null = createAsyncTraceStorage();
   private completedSpans: SpanData[] = [];
@@ -157,6 +207,7 @@ export class TracingModule {
     config: {
       service?: string;
       environment?: string;
+      platform?: string;
       beforeSendSpan?: SpanProcessor;
       ignoreSpans?: SpanFilterPattern[];
     },
@@ -164,6 +215,7 @@ export class TracingModule {
     this.transport = transport;
     this.service = config.service || '';
     this.environment = config.environment || '';
+    this.platform = config.platform || '';
     this.beforeSendSpan = config.beforeSendSpan;
     this.ignoreSpans = config.ignoreSpans ?? [];
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
@@ -238,7 +290,7 @@ export class TracingModule {
    */
   startSpan(
     operation: string,
-    options?: { description?: string; tags?: Record<string, string> },
+    options?: SpanOptions,
   ): Span {
     const state = this.state();
     const spanId = generateId().replace(/-/g, '');
@@ -256,6 +308,10 @@ export class TracingModule {
       service: this.service,
       environment: this.environment,
       tags: options?.tags || {},
+      attributes: options?.attributes || {},
+      measurements: options?.measurements || {},
+      op: options?.op || inferOp(operation),
+      platform: options?.platform || this.platform,
       startTimeMillis: Date.now(),
       onFinish: (spanData: SpanData) => {
         const idx = state.spanStack.indexOf(spanId);
@@ -340,4 +396,13 @@ function createAsyncTraceStorage(): AsyncTraceStorage | null {
   } catch {
     return null;
   }
+}
+
+function inferOp(operation: string): string {
+  const trimmed = operation.trim();
+  const methodMatch = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+/i.exec(trimmed);
+  if (methodMatch) return 'http.server';
+  if (trimmed.startsWith('db.') || trimmed.includes('.query')) return 'db';
+  if (trimmed.startsWith('http.') || trimmed.includes('fetch') || trimmed.includes('request')) return 'http.client';
+  return trimmed.includes('.') ? trimmed.split('.')[0] || trimmed : 'custom';
 }

@@ -308,7 +308,12 @@ describe('flush()', () => {
     expect(await AllStak.flush(500)).toBe(true);
     const spanRequest = sent.find((entry) => entry.url.includes('/ingest/v1/spans'));
     expect(spanRequest).toBeDefined();
-    expect(JSON.parse(spanRequest!.init.body).spans[0].operation).toBe('flush.short-lived-script');
+    const body = JSON.parse(spanRequest!.init.body);
+    expect(body.spans[0].operation).toBe('flush.short-lived-script');
+    expect(['browser', 'node']).toContain(body.spans[0].platform);
+    expect(body.spans[0].op).toBe('flush');
+    expect(body.spans[0].measurements.duration_ms).toEqual(expect.any(Number));
+    expect(body.spans[0].attributes).toEqual({});
   });
 
   it('uses unref timers so SDK batching does not keep Node scripts alive', () => {

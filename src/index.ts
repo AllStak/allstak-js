@@ -5,7 +5,7 @@ import type { TransportStats } from './transport/http';
 import type { ErrorEventProcessor } from './modules/errors';
 import type { HttpRequestItem } from './modules/http-requests';
 import type { HeartbeatOptions } from './modules/cron';
-import type { Span, SpanProcessor } from './modules/tracing';
+import type { Span, SpanOptions, SpanProcessor } from './modules/tracing';
 import type { DbQueryItem } from './modules/database';
 import type { DatabaseModule } from './modules/database';
 import type { AllStakIntegration } from './integration';
@@ -24,7 +24,7 @@ export type { LogEvent, LogLevel } from './modules/logs';
 export type { ReplayEvent, DOMEvent } from './modules/session-replay';
 export type { HttpRequestItem } from './modules/http-requests';
 export type { HeartbeatOptions } from './modules/cron';
-export type { SpanData, SpanProcessor, SpanFilterPattern } from './modules/tracing';
+export type { SpanData, SpanOptions, SpanProcessor, SpanFilterPattern } from './modules/tracing';
 export { Span } from './modules/tracing';
 export type { DbQueryItem } from './modules/database';
 export { DatabaseModule } from './modules/database';
@@ -203,7 +203,7 @@ export const AllStak = {
    */
   startSpan(
     operation: string,
-    options?: { description?: string; tags?: Record<string, string> },
+    options?: SpanOptions,
   ): Span {
     return ensureInit().startSpan(operation, options);
   },
@@ -214,7 +214,7 @@ export const AllStak = {
   trace<T>(
     operation: string,
     callback: (span: Span) => T,
-    options?: { description?: string; tags?: Record<string, string> },
+    options?: SpanOptions,
   ): T {
     return ensureInit().trace(operation, callback, options);
   },

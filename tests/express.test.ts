@@ -79,12 +79,16 @@ describe('Express integration', () => {
 
     const logCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/ingest/v1/logs'));
     const requestCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/ingest/v1/http-requests'));
+    const spanCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/ingest/v1/spans'));
     expect(logCall).toBeDefined();
     expect(requestCall).toBeDefined();
+    expect(spanCall).toBeDefined();
 
     const logBody = JSON.parse(logCall![1].body as string);
     const requestBody = JSON.parse(requestCall![1].body as string);
+    const spanBody = JSON.parse(spanCall![1].body as string);
     const captured = requestBody.requests[0];
+    const span = spanBody.spans[0];
 
     expect(captured.requestId).toBeTruthy();
     expect(captured.traceId).toBeTruthy();
@@ -96,5 +100,12 @@ describe('Express integration', () => {
     expect(captured.responseBody).toContain('"orderId": "ord_123"');
     expect(captured.requestBodyCaptureStatus).toBe('captured');
     expect(captured.responseBodyCaptureStatus).toBe('captured');
+    expect(span.platform).toBe('node');
+    expect(span.op).toBe('http.server');
+    expect(span.measurements.duration_ms).toEqual(expect.any(Number));
+    expect(span.attributes['http.method']).toBe('POST');
+    expect(span.attributes['http.route']).toBe('/orders');
+    expect(span.attributes['http.status_code']).toBe('201');
+    expect(span.attributes['allstak.request_id']).toBe(captured.requestId);
   });
 });

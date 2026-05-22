@@ -4,7 +4,7 @@ import { LogModule, LogLevel } from './modules/logs';
 import { SessionReplayModule } from './modules/session-replay';
 import { HttpRequestModule, HttpRequestItem } from './modules/http-requests';
 import { CronModule, HeartbeatOptions } from './modules/cron';
-import { TracingModule, Span, SpanData, SpanFilterPattern, SpanProcessor } from './modules/tracing';
+import { TracingModule, Span, SpanData, SpanFilterPattern, SpanOptions, SpanProcessor } from './modules/tracing';
 import { DatabaseModule, DbQueryItem } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
 import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
@@ -315,6 +315,7 @@ export class AllStakClient {
     this.tracing = new TracingModule(this.transport, {
       service: config.tags?.service,
       environment: config.environment,
+      platform: config.platform,
       beforeSendSpan: config.beforeSendSpan,
       ignoreSpans: config.ignoreSpans,
     });
@@ -684,7 +685,7 @@ export class AllStakClient {
    */
   startSpan(
     operation: string,
-    options?: { description?: string; tags?: Record<string, string> },
+    options?: SpanOptions,
   ): Span {
     return this.tracing.startSpan(operation, options);
   }
@@ -697,7 +698,7 @@ export class AllStakClient {
   trace<T>(
     operation: string,
     callback: (span: Span) => T,
-    options?: { description?: string; tags?: Record<string, string> },
+    options?: SpanOptions,
   ): T {
     const span = this.tracing.startSpan(operation, options);
     let finished = false;
