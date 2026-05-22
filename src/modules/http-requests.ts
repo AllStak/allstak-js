@@ -5,6 +5,10 @@ export interface HttpRequestItem {
   traceId?: string;
   /** Unique request identifier — generates one if not provided */
   requestId?: string;
+  /** Current span id for this HTTP request */
+  spanId?: string;
+  /** Parent span id when available */
+  parentSpanId?: string;
   /** 'inbound' = request arriving at this service; 'outbound' = request made to external service */
   direction: 'inbound' | 'outbound';
   method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
@@ -16,8 +20,8 @@ export interface HttpRequestItem {
   responseSize?: number;
   requestBody?: string;
   responseBody?: string;
-  requestHeaders?: Record<string, string>;
-  responseHeaders?: Record<string, string>;
+  requestHeaders?: Record<string, string> | string;
+  responseHeaders?: Record<string, string> | string;
   requestBodyCaptureStatus?: string;
   responseBodyCaptureStatus?: string;
   requestBodyCaptureReason?: string;
@@ -33,6 +37,8 @@ export interface HttpRequestItem {
 interface HttpRequestIngestItem {
   traceId: string;
   requestId: string;
+  spanId?: string;
+  parentSpanId?: string;
   direction: 'inbound' | 'outbound';
   method: string;
   host: string;
@@ -43,8 +49,8 @@ interface HttpRequestIngestItem {
   responseSize?: number;
   requestBody?: string;
   responseBody?: string;
-  requestHeaders?: Record<string, string>;
-  responseHeaders?: Record<string, string>;
+  requestHeaders?: string;
+  responseHeaders?: string;
   requestBodyCaptureStatus?: string;
   responseBodyCaptureStatus?: string;
   requestBodyCaptureReason?: string;
@@ -115,6 +121,8 @@ export class HttpRequestModule {
     this.queue.push({
       traceId: item.traceId ?? generateTraceId(),
       requestId: item.requestId ?? generateTraceId(),
+      spanId: item.spanId,
+      parentSpanId: item.parentSpanId,
       direction: item.direction,
       method: item.method,
       host: item.host,
@@ -125,8 +133,8 @@ export class HttpRequestModule {
       responseSize: item.responseSize,
       requestBody: item.requestBody,
       responseBody: item.responseBody,
-      requestHeaders: item.requestHeaders,
-      responseHeaders: item.responseHeaders,
+      requestHeaders: serializeHeaders(item.requestHeaders),
+      responseHeaders: serializeHeaders(item.responseHeaders),
       requestBodyCaptureStatus: item.requestBodyCaptureStatus,
       responseBodyCaptureStatus: item.responseBodyCaptureStatus,
       requestBodyCaptureReason: item.requestBodyCaptureReason,
@@ -157,5 +165,15 @@ export class HttpRequestModule {
       this.flushTimer = null;
     }
     this.flush();
+  }
+}
+
+function serializeHeaders(headers: Record<string, string> | string | undefined): string | undefined {
+  if (headers == null) return undefined;
+  if (typeof headers === 'string') return headers;
+  try {
+    return JSON.stringify(headers);
+  } catch {
+    return undefined;
   }
 }

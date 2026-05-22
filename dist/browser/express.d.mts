@@ -1,3 +1,5 @@
+import { H as HttpBodyCaptureOptions } from './auto-breadcrumbs-DRB0ieVv.mjs';
+
 /**
  * Drop-in Express middleware for the AllStak SDK.
  *
@@ -23,6 +25,7 @@
  * app.use(allstakExpress.errorHandler());
  * ```
  */
+
 interface ExpressRequest {
     method: string;
     originalUrl?: string;
@@ -45,10 +48,21 @@ interface ExpressRequest {
 interface ExpressResponse {
     statusCode: number;
     getHeader(name: string): unknown;
+    setHeader?(name: string, value: unknown): void;
     on(event: 'finish' | 'close', cb: () => void): void;
+    send?: (body?: unknown) => unknown;
+    json?: (body?: unknown) => unknown;
     [k: string]: unknown;
 }
 type NextFn = (err?: unknown) => void;
+interface ExpressRequestHandlerOptions {
+    /**
+     * Capture inbound Express request/response bodies. Defaults to the global
+     * `httpBodyCapture` SDK option. Bodies are redacted and size-limited before
+     * transport; auth/cookie/session headers are always redacted.
+     */
+    bodyCapture?: HttpBodyCaptureOptions | boolean;
+}
 declare const allstakExpress: {
     /**
      * Mount this BEFORE your routes. Opens a root span for the request,
@@ -56,7 +70,7 @@ declare const allstakExpress: {
      * the response finishes, and auto-attaches `req.user` onto subsequent
      * captures.
      */
-    requestHandler(): (req: ExpressRequest, res: ExpressResponse, next: NextFn) => void;
+    requestHandler(options?: ExpressRequestHandlerOptions): (req: ExpressRequest, res: ExpressResponse, next: NextFn) => void;
     /**
      * Mount this AFTER your routes. Captures any error thrown by an Express
      * route or middleware (including async errors forwarded via `next(err)`).

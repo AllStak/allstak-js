@@ -365,6 +365,8 @@ export class AllStakClient {
     const traceContext: Record<string, unknown> = {};
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
+    const requestId = this.tracing.getRequestId();
+    if (requestId) traceContext.requestId = requestId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
     this.withScopedConfig(() =>
@@ -519,6 +521,12 @@ export class AllStakClient {
     if (!item.traceId) {
       item.traceId = this.tracing.getTraceId();
     }
+    if (!item.requestId) {
+      item.requestId = this.tracing.getRequestId() ?? undefined;
+    }
+    if (!item.spanId) {
+      item.spanId = this.tracing.getCurrentSpanId() ?? undefined;
+    }
     this.httpRequests.capture(item);
   }
 
@@ -555,6 +563,10 @@ export class AllStakClient {
       if (!enriched.spanId) {
         const spanId = this.tracing.getCurrentSpanId();
         if (spanId) enriched.spanId = spanId;
+      }
+      if (!enriched.requestId) {
+        const requestId = this.tracing.getRequestId();
+        if (requestId) enriched.requestId = requestId;
       }
       return enriched;
     };
@@ -719,13 +731,27 @@ export class AllStakClient {
   }
 
   /** @internal Used by server framework integrations to isolate request tracing. */
-  withTraceContext<T>(traceId: string | undefined, callback: () => T): T {
-    return this.tracing.withTraceContext(traceId, callback);
+  withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
+  withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+  withTraceContext<T>(
+    traceId: string | undefined,
+    requestIdOrCallback: string | undefined | (() => T),
+    maybeCallback?: () => T,
+  ): T {
+    if (typeof requestIdOrCallback === 'function') {
+      return this.tracing.withTraceContext(traceId, requestIdOrCallback);
+    }
+    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback!);
   }
 
   /** Get the current trace ID (creates one if none exists). */
   getTraceId(): string {
     return this.tracing.getTraceId();
+  }
+
+  /** Get the current request ID, when inside a server framework request context. */
+  getRequestId(): string | null {
+    return this.tracing.getRequestId();
   }
 
   /** Set the trace ID explicitly (e.g. from an incoming request header). */

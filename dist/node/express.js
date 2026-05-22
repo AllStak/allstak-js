@@ -371,6 +371,14 @@ function redactObject(input, options = {}) {
   const seen = /* @__PURE__ */ new WeakMap();
   return walk(input, extra, 0, maxDepth, seen);
 }
+function redactValue(input, options = {}) {
+  if (input == null) return input;
+  if (typeof input !== "object") return input;
+  const extra = compileExtraPatterns(options.extraKeys);
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+  const seen = /* @__PURE__ */ new WeakMap();
+  return walk(input, extra, 0, maxDepth, seen);
+}
 function walk(node, extra, depth, maxDepth, seen) {
   if (node == null) return node;
   const t = typeof node;
@@ -398,6 +406,16 @@ function walk(node, extra, depth, maxDepth, seen) {
       continue;
     }
     out[k] = walk(v, extra, depth + 1, maxDepth, seen);
+  }
+  return out;
+}
+function redactHeaderRecord(headers, options = {}) {
+  if (!headers) return headers;
+  const extra = compileExtraPatterns(options.extraKeys);
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (v == null) continue;
+    out[k] = isSensitiveKey(k, extra) ? REDACTED : v;
   }
   return out;
 }
@@ -1095,6 +1113,8 @@ var HttpRequestModule = class {
     this.queue.push({
       traceId: item.traceId ?? generateTraceId(),
       requestId: item.requestId ?? generateTraceId(),
+      spanId: item.spanId,
+      parentSpanId: item.parentSpanId,
       direction: item.direction,
       method: item.method,
       host: item.host,
@@ -1105,8 +1125,8 @@ var HttpRequestModule = class {
       responseSize: item.responseSize,
       requestBody: item.requestBody,
       responseBody: item.responseBody,
-      requestHeaders: item.requestHeaders,
-      responseHeaders: item.responseHeaders,
+      requestHeaders: serializeHeaders(item.requestHeaders),
+      responseHeaders: serializeHeaders(item.responseHeaders),
       requestBodyCaptureStatus: item.requestBodyCaptureStatus,
       responseBodyCaptureStatus: item.responseBodyCaptureStatus,
       requestBodyCaptureReason: item.requestBodyCaptureReason,
@@ -1135,6 +1155,15 @@ var HttpRequestModule = class {
     this.flush();
   }
 };
+function serializeHeaders(headers) {
+  if (headers == null) return void 0;
+  if (typeof headers === "string") return headers;
+  try {
+    return JSON.stringify(headers);
+  } catch {
+    return void 0;
+  }
+}
 
 // src/modules/cron.ts
 var INGEST_PATH5 = "/ingest/v1/heartbeat";
@@ -1266,17 +1295,15 @@ var TracingModule = class {
   addSpanProcessor(processor) {
     this.spanProcessors.push(processor);
   }
-  /**
-   * Run work inside an isolated trace context. In Node this uses
-   * AsyncLocalStorage so overlapping requests don't share trace/span state.
-   * Browser builds fall back to the historical global context.
-   */
-  withTraceContext(traceId, callback) {
+  withTraceContext(traceId, requestIdOrCallback, maybeCallback) {
+    const requestId = typeof requestIdOrCallback === "function" ? void 0 : requestIdOrCallback;
+    const callback = typeof requestIdOrCallback === "function" ? requestIdOrCallback : maybeCallback;
     if (!this.asyncStorage) {
       if (traceId) this.globalState.traceId = traceId;
+      if (requestId) this.globalState.requestId = requestId;
       return callback();
     }
-    return this.asyncStorage.run({ traceId: traceId ?? null, spanStack: [] }, callback);
+    return this.asyncStorage.run({ traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [] }, callback);
   }
   state() {
     return this.asyncStorage?.getStore() ?? this.globalState;
@@ -1292,6 +1319,12 @@ var TracingModule = class {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
     this.state().traceId = traceId;
+  }
+  getRequestId() {
+    return this.state().requestId ?? null;
+  }
+  setRequestId(requestId) {
+    this.state().requestId = requestId;
   }
   /** Get the current active span ID (top of the span stack), or null. */
   getCurrentSpanId() {
@@ -1341,6 +1374,7 @@ var TracingModule = class {
   resetTrace() {
     const state = this.state();
     state.traceId = null;
+    state.requestId = null;
     state.spanStack = [];
   }
   /** Stop the flush timer and do a final flush. */
@@ -2088,7 +2122,7 @@ function sanitizeBody(body, contentType, allowedContentTypes, maxBodySize, custo
   let sanitized;
   try {
     const parsed = JSON.parse(raw.replace(/\n\[TRUNCATED]$/, ""));
-    sanitized = JSON.stringify(redactValue(parsed, customFields), null, 2) + (truncated ? "\n[TRUNCATED]" : "");
+    sanitized = JSON.stringify(redactValue2(parsed, customFields), null, 2) + (truncated ? "\n[TRUNCATED]" : "");
   } catch {
     sanitized = redactText(raw);
   }
@@ -2103,12 +2137,12 @@ function isAllowedContentType(contentType, allowed) {
   if (!contentType) return false;
   return allowed.some((candidate) => contentType.toLowerCase().includes(candidate.toLowerCase()));
 }
-function redactValue(value, customFields = []) {
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, customFields));
+function redactValue2(value, customFields = []) {
+  if (Array.isArray(value)) return value.map((item) => redactValue2(item, customFields));
   if (value && typeof value === "object") {
     const out = {};
     for (const [key, child] of Object.entries(value)) {
-      out[key] = isSensitiveKey2(key, customFields) ? "[REDACTED]" : redactValue(child, customFields);
+      out[key] = isSensitiveKey2(key, customFields) ? "[REDACTED]" : redactValue2(child, customFields);
     }
     return out;
   }
@@ -2663,6 +2697,8 @@ var AllStakClient = class {
     const traceContext = {};
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
+    const requestId = this.tracing.getRequestId();
+    if (requestId) traceContext.requestId = requestId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
     this.withScopedConfig(
@@ -2801,6 +2837,12 @@ var AllStakClient = class {
     if (!item.traceId) {
       item.traceId = this.tracing.getTraceId();
     }
+    if (!item.requestId) {
+      item.requestId = this.tracing.getRequestId() ?? void 0;
+    }
+    if (!item.spanId) {
+      item.spanId = this.tracing.getCurrentSpanId() ?? void 0;
+    }
     this.httpRequests.capture(item);
   }
   /**
@@ -2833,6 +2875,10 @@ var AllStakClient = class {
       if (!enriched.spanId) {
         const spanId = this.tracing.getCurrentSpanId();
         if (spanId) enriched.spanId = spanId;
+      }
+      if (!enriched.requestId) {
+        const requestId = this.tracing.getRequestId();
+        if (requestId) enriched.requestId = requestId;
       }
       return enriched;
     };
@@ -2965,13 +3011,19 @@ var AllStakClient = class {
       throw error;
     }
   }
-  /** @internal Used by server framework integrations to isolate request tracing. */
-  withTraceContext(traceId, callback) {
-    return this.tracing.withTraceContext(traceId, callback);
+  withTraceContext(traceId, requestIdOrCallback, maybeCallback) {
+    if (typeof requestIdOrCallback === "function") {
+      return this.tracing.withTraceContext(traceId, requestIdOrCallback);
+    }
+    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback);
   }
   /** Get the current trace ID (creates one if none exists). */
   getTraceId() {
     return this.tracing.getTraceId();
+  }
+  /** Get the current request ID, when inside a server framework request context. */
+  getRequestId() {
+    return this.tracing.getRequestId();
   }
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
@@ -3309,7 +3361,7 @@ var allstakExpress = {
    * the response finishes, and auto-attaches `req.user` onto subsequent
    * captures.
    */
-  requestHandler() {
+  requestHandler(options = {}) {
     return function allstakRequestHandler(req, res, next) {
       const sdk = AllStak._getInstance();
       if (!sdk) {
@@ -3321,8 +3373,16 @@ var allstakExpress = {
       const method = methodOf(req);
       const host = hostOf(req);
       const route = routeOf(req);
+      const requestId = firstHeader(req.headers["x-allstak-request-id"]) ?? firstHeader(req.headers["x-request-id"]) ?? generateRequestId2();
+      const bodyCapture = resolveBodyCapture(sdk.getOptions().httpBodyCapture, options.bodyCapture);
+      const responseCapture = installResponseCapture(res);
+      try {
+        res.setHeader?.("x-allstak-request-id", requestId);
+      } catch {
+      }
       const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
-      sdk.withTraceContext(upstreamTrace, () => {
+      sdk.withTraceContext(upstreamTrace, requestId, () => {
+        const traceId = sdk.getTraceId();
         let rootSpan = null;
         try {
           rootSpan = sdk.startSpan(`${method} ${path}`, {
@@ -3330,7 +3390,8 @@ var allstakExpress = {
             tags: {
               "http.method": method,
               "http.url": path,
-              "http.host": host
+              "http.host": host,
+              "http.request_id": requestId
             }
           });
         } catch {
@@ -3344,12 +3405,18 @@ var allstakExpress = {
             const u = userFromRequest(req);
             if (u) sdk.setUser(u);
             AllStak.captureRequest({
+              traceId,
+              requestId,
+              spanId: rootSpan?.spanId,
               direction: "inbound",
               method,
               host,
               path,
               statusCode: res.statusCode,
               durationMs,
+              requestHeaders: redactHeaders(req.headers, sdk.getOptions().redactKeys),
+              responseHeaders: redactResponseHeaders(res, sdk.getOptions().redactKeys),
+              ...captureInboundBodies(req, responseCapture.body, responseCapture.contentType, bodyCapture),
               userId: u?.id,
               timestamp: new Date(start).toISOString()
             });
@@ -3395,7 +3462,11 @@ var allstakExpress = {
           const path = pathFromRequest(req);
           const host = hostOf(req);
           const route = routeOf(req);
+          const requestId = firstHeader(req.headers["x-allstak-request-id"]) ?? firstHeader(req.headers["x-request-id"]) ?? sdk.getRequestId() ?? void 0;
           AllStak.captureException(e, {
+            traceId: sdk.getTraceId(),
+            requestId,
+            spanId: sdk.getCurrentSpanId() ?? void 0,
             transaction: route ? `${method} ${route}` : `${method} ${path}`,
             requestContext: {
               method,
@@ -3408,6 +3479,7 @@ var allstakExpress = {
             "request.method": method,
             "request.path": path,
             "request.host": host,
+            ...requestId ? { "request.id": requestId } : {},
             ...route ? { "request.route": route } : {}
           });
         }
@@ -3425,6 +3497,111 @@ function traceIdFromTraceparent(header) {
   if (!header) return void 0;
   const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
   return match?.[1];
+}
+function generateRequestId2() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
+function resolveBodyCapture(globalOption, localOption) {
+  const option = localOption === void 0 ? globalOption : localOption;
+  if (option === true) return { enabled: true };
+  if (!option || option.enabled === false) return false;
+  return option;
+}
+function installResponseCapture(res) {
+  const captured = { body: void 0 };
+  const originalSend = typeof res.send === "function" ? res.send.bind(res) : null;
+  const originalJson = typeof res.json === "function" ? res.json.bind(res) : null;
+  if (originalSend) {
+    res.send = (body) => {
+      captured.body = body;
+      captured.contentType = headerToString(res.getHeader("content-type"));
+      return originalSend(body);
+    };
+  }
+  if (originalJson) {
+    res.json = (body) => {
+      captured.body = body;
+      captured.contentType = headerToString(res.getHeader("content-type")) ?? "application/json";
+      return originalJson(body);
+    };
+  }
+  return captured;
+}
+function captureInboundBodies(req, responseBody, responseContentType, options) {
+  if (!options) {
+    return {
+      requestBodyCaptureStatus: "disabled",
+      responseBodyCaptureStatus: "disabled",
+      requestBodyCaptureReason: "HTTP body capture is disabled by SDK configuration.",
+      responseBodyCaptureReason: "HTTP body capture is disabled by SDK configuration."
+    };
+  }
+  const contentTypes = options.contentTypes ?? ["application/json", "text/plain"];
+  const maxBodySize = Math.max(0, options.maxBodySize ?? 8192);
+  const requestContentType = firstHeader(req.headers["content-type"]);
+  const requestCapture = sanitizeBodyForTransport(req.body, requestContentType, contentTypes, maxBodySize, options.redactFields);
+  const responseCapture = sanitizeBodyForTransport(responseBody, responseContentType, contentTypes, maxBodySize, options.redactFields);
+  return {
+    requestBody: requestCapture.body,
+    responseBody: responseCapture.body,
+    requestSize: requestCapture.sizeBytes,
+    responseSize: responseCapture.sizeBytes,
+    requestBodyCaptureStatus: requestCapture.status,
+    responseBodyCaptureStatus: responseCapture.status,
+    requestBodyCaptureReason: requestCapture.reason,
+    responseBodyCaptureReason: responseCapture.reason
+  };
+}
+function sanitizeBodyForTransport(value, contentType, allowedContentTypes, maxBodySize, redactFields) {
+  if (value == null || value === "") {
+    return { status: "empty", reason: "Body was empty.", sizeBytes: 0 };
+  }
+  if (!isAllowedContentType2(contentType, allowedContentTypes)) {
+    return { status: "unsupported", reason: "Content type is not allowlisted for HTTP body capture." };
+  }
+  const raw = typeof value === "string" || Buffer.isBuffer(value) ? value.toString() : JSON.stringify(redactValue(value, { extraKeys: redactFields }), null, 2);
+  const truncated = raw.length > maxBodySize;
+  const body = truncated ? raw.slice(0, maxBodySize) + "\n[TRUNCATED]" : raw;
+  return {
+    body,
+    status: truncated ? "truncated" : "captured",
+    reason: truncated ? `Body exceeded configured max size of ${maxBodySize} bytes.` : void 0,
+    sizeBytes: raw.length
+  };
+}
+function isAllowedContentType2(contentType, allowed) {
+  if (!contentType) return false;
+  return allowed.some((candidate) => contentType.toLowerCase().includes(candidate.toLowerCase()));
+}
+function redactHeaders(headers, extraKeys) {
+  const redacted = redactHeaderRecord(headers, { extraKeys }) ?? {};
+  return Object.fromEntries(
+    Object.entries(redacted).map(([key, value]) => [
+      key.toLowerCase(),
+      Array.isArray(value) ? value.join(", ") : value
+    ])
+  );
+}
+function redactResponseHeaders(res, extraKeys) {
+  const headers = {};
+  for (const name of ["content-type", "content-length", "x-allstak-request-id"]) {
+    const value = res.getHeader(name);
+    if (typeof value === "string") headers[name] = value;
+    else if (typeof value === "number") headers[name] = String(value);
+    else if (Array.isArray(value)) headers[name] = value.map(String);
+  }
+  return redactHeaders(headers, extraKeys);
+}
+function headerToString(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map(String).join(", ");
+  return void 0;
 }
 var express_default = allstakExpress;
 // Annotate the CommonJS export names for ESM import in node:

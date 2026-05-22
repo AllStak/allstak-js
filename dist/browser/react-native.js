@@ -1096,6 +1096,8 @@ var HttpRequestModule = class {
     this.queue.push({
       traceId: item.traceId ?? generateTraceId(),
       requestId: item.requestId ?? generateTraceId(),
+      spanId: item.spanId,
+      parentSpanId: item.parentSpanId,
       direction: item.direction,
       method: item.method,
       host: item.host,
@@ -1106,8 +1108,8 @@ var HttpRequestModule = class {
       responseSize: item.responseSize,
       requestBody: item.requestBody,
       responseBody: item.responseBody,
-      requestHeaders: item.requestHeaders,
-      responseHeaders: item.responseHeaders,
+      requestHeaders: serializeHeaders(item.requestHeaders),
+      responseHeaders: serializeHeaders(item.responseHeaders),
       requestBodyCaptureStatus: item.requestBodyCaptureStatus,
       responseBodyCaptureStatus: item.responseBodyCaptureStatus,
       requestBodyCaptureReason: item.requestBodyCaptureReason,
@@ -1136,6 +1138,15 @@ var HttpRequestModule = class {
     this.flush();
   }
 };
+function serializeHeaders(headers) {
+  if (headers == null) return void 0;
+  if (typeof headers === "string") return headers;
+  try {
+    return JSON.stringify(headers);
+  } catch {
+    return void 0;
+  }
+}
 
 // src/modules/cron.ts
 var INGEST_PATH5 = "/ingest/v1/heartbeat";
@@ -1267,17 +1278,15 @@ var TracingModule = class {
   addSpanProcessor(processor) {
     this.spanProcessors.push(processor);
   }
-  /**
-   * Run work inside an isolated trace context. In Node this uses
-   * AsyncLocalStorage so overlapping requests don't share trace/span state.
-   * Browser builds fall back to the historical global context.
-   */
-  withTraceContext(traceId, callback) {
+  withTraceContext(traceId, requestIdOrCallback, maybeCallback) {
+    const requestId = typeof requestIdOrCallback === "function" ? void 0 : requestIdOrCallback;
+    const callback = typeof requestIdOrCallback === "function" ? requestIdOrCallback : maybeCallback;
     if (!this.asyncStorage) {
       if (traceId) this.globalState.traceId = traceId;
+      if (requestId) this.globalState.requestId = requestId;
       return callback();
     }
-    return this.asyncStorage.run({ traceId: traceId ?? null, spanStack: [] }, callback);
+    return this.asyncStorage.run({ traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [] }, callback);
   }
   state() {
     return this.asyncStorage?.getStore() ?? this.globalState;
@@ -1293,6 +1302,12 @@ var TracingModule = class {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
     this.state().traceId = traceId;
+  }
+  getRequestId() {
+    return this.state().requestId ?? null;
+  }
+  setRequestId(requestId) {
+    this.state().requestId = requestId;
   }
   /** Get the current active span ID (top of the span stack), or null. */
   getCurrentSpanId() {
@@ -1342,6 +1357,7 @@ var TracingModule = class {
   resetTrace() {
     const state = this.state();
     state.traceId = null;
+    state.requestId = null;
     state.spanStack = [];
   }
   /** Stop the flush timer and do a final flush. */
@@ -2664,6 +2680,8 @@ var AllStakClient = class {
     const traceContext = {};
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
+    const requestId = this.tracing.getRequestId();
+    if (requestId) traceContext.requestId = requestId;
     const spanId = this.tracing.getCurrentSpanId();
     if (spanId) traceContext.spanId = spanId;
     this.withScopedConfig(
@@ -2802,6 +2820,12 @@ var AllStakClient = class {
     if (!item.traceId) {
       item.traceId = this.tracing.getTraceId();
     }
+    if (!item.requestId) {
+      item.requestId = this.tracing.getRequestId() ?? void 0;
+    }
+    if (!item.spanId) {
+      item.spanId = this.tracing.getCurrentSpanId() ?? void 0;
+    }
     this.httpRequests.capture(item);
   }
   /**
@@ -2834,6 +2858,10 @@ var AllStakClient = class {
       if (!enriched.spanId) {
         const spanId = this.tracing.getCurrentSpanId();
         if (spanId) enriched.spanId = spanId;
+      }
+      if (!enriched.requestId) {
+        const requestId = this.tracing.getRequestId();
+        if (requestId) enriched.requestId = requestId;
       }
       return enriched;
     };
@@ -2966,13 +2994,19 @@ var AllStakClient = class {
       throw error;
     }
   }
-  /** @internal Used by server framework integrations to isolate request tracing. */
-  withTraceContext(traceId, callback) {
-    return this.tracing.withTraceContext(traceId, callback);
+  withTraceContext(traceId, requestIdOrCallback, maybeCallback) {
+    if (typeof requestIdOrCallback === "function") {
+      return this.tracing.withTraceContext(traceId, requestIdOrCallback);
+    }
+    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback);
   }
   /** Get the current trace ID (creates one if none exists). */
   getTraceId() {
     return this.tracing.getTraceId();
+  }
+  /** Get the current request ID, when inside a server framework request context. */
+  getRequestId() {
+    return this.tracing.getRequestId();
   }
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {

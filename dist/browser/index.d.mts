@@ -1,4 +1,5 @@
 import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-DMxZg38h.mjs';
+import { H as HttpBodyCaptureOptions, T as TracePropagationTarget } from './auto-breadcrumbs-DRB0ieVv.mjs';
 
 interface ErrorEvent {
     type: 'error';
@@ -117,6 +118,10 @@ interface HttpRequestItem {
     traceId?: string;
     /** Unique request identifier — generates one if not provided */
     requestId?: string;
+    /** Current span id for this HTTP request */
+    spanId?: string;
+    /** Parent span id when available */
+    parentSpanId?: string;
     /** 'inbound' = request arriving at this service; 'outbound' = request made to external service */
     direction: 'inbound' | 'outbound';
     method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
@@ -128,8 +133,8 @@ interface HttpRequestItem {
     responseSize?: number;
     requestBody?: string;
     responseBody?: string;
-    requestHeaders?: Record<string, string>;
-    responseHeaders?: Record<string, string>;
+    requestHeaders?: Record<string, string> | string;
+    responseHeaders?: Record<string, string> | string;
     requestBodyCaptureStatus?: string;
     responseBodyCaptureStatus?: string;
     requestBodyCaptureReason?: string;
@@ -236,14 +241,6 @@ declare class Span {
     get spanId(): string;
     get traceId(): string;
     get isFinished(): boolean;
-}
-
-type TracePropagationTarget = string | RegExp;
-interface HttpBodyCaptureOptions {
-    enabled?: boolean;
-    maxBodySize?: number;
-    contentTypes?: string[];
-    redactFields?: string[];
 }
 
 interface AllStakIntegration {
@@ -606,8 +603,11 @@ declare class AllStakClient {
     }): T;
     /** @internal Used by server framework integrations to isolate request tracing. */
     withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
+    withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
     /** Get the current trace ID (creates one if none exists). */
     getTraceId(): string;
+    /** Get the current request ID, when inside a server framework request context. */
+    getRequestId(): string | null;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
     setTraceId(traceId: string): void;
     /** Get the current active span ID, or null if no span is active. */

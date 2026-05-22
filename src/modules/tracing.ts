@@ -28,8 +28,9 @@ const INGEST_PATH = '/ingest/v1/spans';
 const FLUSH_INTERVAL_MS = 5_000;
 const BATCH_SIZE_THRESHOLD = 20;
 
-interface TraceState {
+export interface TraceState {
   traceId: string | null;
+  requestId?: string | null;
   spanStack: string[];
 }
 
@@ -180,12 +181,21 @@ export class TracingModule {
    * AsyncLocalStorage so overlapping requests don't share trace/span state.
    * Browser builds fall back to the historical global context.
    */
-  withTraceContext<T>(traceId: string | undefined, callback: () => T): T {
+  withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
+  withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+  withTraceContext<T>(
+    traceId: string | undefined,
+    requestIdOrCallback: string | undefined | (() => T),
+    maybeCallback?: () => T,
+  ): T {
+    const requestId = typeof requestIdOrCallback === 'function' ? undefined : requestIdOrCallback;
+    const callback = typeof requestIdOrCallback === 'function' ? requestIdOrCallback : maybeCallback!;
     if (!this.asyncStorage) {
       if (traceId) this.globalState.traceId = traceId;
+      if (requestId) this.globalState.requestId = requestId;
       return callback();
     }
-    return this.asyncStorage.run({ traceId: traceId ?? null, spanStack: [] }, callback);
+    return this.asyncStorage.run({ traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [] }, callback);
   }
 
   private state(): TraceState {
@@ -204,6 +214,14 @@ export class TracingModule {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId: string): void {
     this.state().traceId = traceId;
+  }
+
+  getRequestId(): string | null {
+    return this.state().requestId ?? null;
+  }
+
+  setRequestId(requestId: string): void {
+    this.state().requestId = requestId;
   }
 
   /** Get the current active span ID (top of the span stack), or null. */
@@ -265,6 +283,7 @@ export class TracingModule {
   resetTrace(): void {
     const state = this.state();
     state.traceId = null;
+    state.requestId = null;
     state.spanStack = [];
   }
 
