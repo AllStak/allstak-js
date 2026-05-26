@@ -2,13 +2,17 @@
  * AllStak SDK End-to-End Test Suite
  *
  * Tests ALL SDK features against a real running backend.
- * API Key: sk_4f53a969-4f5e-4403-a0df-ea54596661f0
+ * API Key: read from ALLSTAK_API_KEY
  * Base URL: http://localhost:8080
  */
 
 const BASE_URL = 'http://localhost:8080';
-const API_KEY = 'ask_9c3775eab9264e9aa4048b7bafc1c512';
+const API_KEY = process.env.ALLSTAK_API_KEY;
 const PROJECT_ID = 'c1a88f24-29df-4066-b607-a32e43bfa775';
+
+if (!API_KEY) {
+  throw new Error('Set ALLSTAK_API_KEY before running the SDK test app.');
+}
 
 // Get JWT token for query APIs (they use Bearer auth, not API key)
 const KEYCLOAK_URL = 'http://localhost:8180';
@@ -460,7 +464,7 @@ async function testSDKInit() {
 
     // Init
     const client = AllStak.init({
-      dsn: `http://ask_9c3775eab9264e9aa4048b7bafc1c512@localhost:8080`,
+      dsn: process.env.ALLSTAK_DSN || `http://${API_KEY}@localhost:8080`,
       environment: 'sdk-test',
       release: '0.1.0-test',
     });

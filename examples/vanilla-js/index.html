@@ -215,7 +215,7 @@
 
     // ── Init ────────────────────────────────────────────────────────────
     AllStak.init({
-      dsn: 'http://ask_eba70d15b7364015a075954cf7bc5643@localhost:8080',
+      dsn: window.ALLSTAK_DSN || 'http://ask_live_xxx@localhost:8080',
       environment: 'vanilla-example',
       release: '1.0.0',
       tags: { service: 'allstak-vanilla-demo', framework: 'vanilla-js' },

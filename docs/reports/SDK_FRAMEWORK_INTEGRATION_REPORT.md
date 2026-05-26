@@ -141,7 +141,7 @@ The heartbeat endpoint (`/ingest/v1/heartbeat`) returns `404` if the slug doesn'
 import { AllStak } from '../../dist/browser/index.mjs';
 
 AllStak.init({
-  dsn: 'http://ask_9c3775eab9264e9aa4048b7bafc1c512@localhost:8080',
+  dsn: 'http://ask_live_xxx@localhost:8080',
   environment: 'react-example',
   release: '1.0.0',
   service: 'allstak-react-demo',
@@ -252,4 +252,4 @@ Angular CLI (`ng`) was not installed in the environment. Next.js was not scaffol
 | Backend | Docker `allstak-backend` port 8080 |
 | Dashboard | `http://localhost:3000` |
 | Test credentials | `test@allstak.io` / `Test1234!` |
-| DSN | `http://ask_9c3775eab9264e9aa4048b7bafc1c512@localhost:8080` |
+| DSN | `http://ask_live_xxx@localhost:8080` |

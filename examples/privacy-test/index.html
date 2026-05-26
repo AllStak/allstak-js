@@ -296,8 +296,7 @@
 <script type="module">
   import AllStak from '../../dist/browser/index.mjs';
 
-  // Use the same API key as the vanilla-js example
-  const DSN = 'http://ask_live_vis4replay9c3775eab9264e9aa404@localhost:8080';
+  const DSN = window.ALLSTAK_DSN || 'http://ask_live_xxx@localhost:8080';
 
   try {
     AllStak.init({

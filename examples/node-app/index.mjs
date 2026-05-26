@@ -13,8 +13,12 @@
 
 import { AllStak } from '../../dist/node/index.mjs';
 
-const DSN = 'http://ask_9c3775eab9264e9aa4048b7bafc1c512@localhost:8080';
+const DSN = process.env.ALLSTAK_DSN;
 const PROJECT_ENV = 'node-example';
+
+if (!DSN) {
+  throw new Error('Set ALLSTAK_DSN before running the Node.js integration example.');
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────
 AllStak.init({
