@@ -4,6 +4,7 @@
  * These patches are safe: they only wrap if the globals exist and always
  * delegate to the original implementation.
  */
+import { mergeBaggageValue, normalizeSpanId, normalizeTraceId } from './trace-propagation';
 
 type AddBreadcrumbFn = (
   type: string,
@@ -351,21 +352,6 @@ function mergeAllStakBaggage(headers: Headers, baggage: string): void {
   }
 }
 
-function mergeBaggageValue(existing: string, baggage: string): string {
-  const preserved = existing
-    .split(',')
-    .map((part) => part.trim())
-    .filter((part) => part && !part.toLowerCase().startsWith('allstak-'));
-  return [...preserved, ...baggage.split(',')].join(',');
-}
-
-function normalizeTraceId(traceId: string): string {
-  return traceId.replace(/-/g, '').slice(0, 32).padEnd(32, '0');
-}
-
-function normalizeSpanId(spanId: string): string {
-  return spanId.replace(/-/g, '').slice(0, 16).padEnd(16, '0');
-}
 
 /**
  * Wrap `console.warn` and `console.error` to record log breadcrumbs.

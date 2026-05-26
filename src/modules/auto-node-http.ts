@@ -12,7 +12,9 @@
  *   - On socket error, capture is called with statusCode=0.
  *   - The original behaviour (callbacks, events, streaming, etc.) is preserved.
  */
-import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http';
+import type { ClientRequest, IncomingMessage, OutgoingHttpHeaders, RequestOptions } from 'node:http';
+import type { TracePropagationTarget } from './auto-breadcrumbs';
+import { applyTracePropagationToHeaders, newRequestId, targetMatches } from './trace-propagation';
 
 type CaptureRequestFn = (item: {
   direction: 'outbound';
@@ -54,6 +56,8 @@ export function instrumentNodeHttp(
   capture: CaptureRequestFn,
   addBreadcrumb: AddBreadcrumbFn | null,
   ownBaseUrl: string,
+  getTraceId?: () => string | undefined,
+  tracePropagationTargets?: TracePropagationTarget[],
 ): () => void {
   const restorers: Array<() => void> = [];
 
@@ -109,8 +113,38 @@ export function instrumentNodeHttp(
       const fullUrl = url || `${protocol}://${host}${path}`;
       const isOwnIngest = ownBaseUrl && fullUrl.startsWith(ownBaseUrl);
 
+      // Inject distributed-trace headers on outbound calls so the downstream
+      // service continues this trace. Skips our own ingest, requires an active
+      // trace, and honours tracePropagationTargets.
+      let callArgs: unknown[] = args;
+      const traceId = getTraceId ? getTraceId() : undefined;
+      // The raw `string[]` headers form is uncommon; skip injection for it.
+      if (
+        !isOwnIngest &&
+        traceId &&
+        !Array.isArray(options.headers) &&
+        targetMatches(fullUrl, tracePropagationTargets)
+      ) {
+        try {
+          // Array (raw header pairs) form is excluded by the guard above.
+          const existingHeaders = options.headers as OutgoingHttpHeaders | undefined;
+          const headers: OutgoingHttpHeaders = Object.assign({}, existingHeaders);
+          applyTracePropagationToHeaders(headers, traceId, newRequestId());
+          const nextOptions: RequestOptions = Object.assign({}, options, { headers });
+          // Rebuild args so the (possibly newly-created) options object is passed,
+          // preserving the original url/callback arguments.
+          const rebuilt: unknown[] = [];
+          if (url !== undefined) rebuilt.push(args[0]);
+          rebuilt.push(nextOptions);
+          if (callback) rebuilt.push(callback);
+          callArgs = rebuilt;
+        } catch {
+          callArgs = args; // never break the host request over header injection
+        }
+      }
+
       const start = Date.now();
-      const req = originalRequest(...(args as Parameters<typeof originalRequest>));
+      const req = originalRequest(...(callArgs as Parameters<typeof originalRequest>));
 
       // Hook the response listener BEFORE the user's callback runs.
       req.on('response', (res: IncomingMessage) => {

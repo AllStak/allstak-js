@@ -24,6 +24,8 @@ export const httpClientIntegration = defineIntegration(() => ({
           (item) => client.captureRequest({ ...item, method: item.method as any }),
           (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
           baseUrl,
+          () => client.getTraceId(),
+          options.tracePropagationTargets,
         );
       } catch {
         // Optional Node patching must never break SDK init.
