@@ -470,6 +470,12 @@ interface AllStakConfig extends ReleaseMetadata {
      * version fallback (release may then be left empty).
      */
     autoDetectRelease?: boolean;
+    /**
+     * Register the resolved release with AllStak from the server runtime at SDK
+     * init, without requiring a CI/CD hook. Default true. Browser runtimes are
+     * skipped to avoid one release-registration request per visitor.
+     */
+    autoRegisterRelease?: boolean;
     user?: {
         id?: string;
         email?: string;
@@ -777,6 +783,22 @@ declare global {
     var __ALLSTAK_NODE__: boolean | undefined;
 }
 
+interface RegisterRuntimeReleaseOptions {
+    host: string;
+    apiKey: string;
+    release?: string;
+    environment?: string;
+    commitSha?: string;
+    branch?: string;
+    service?: string;
+    enabled?: boolean;
+    fetchImpl?: typeof fetch;
+}
+declare function canRegisterRuntimeRelease(): boolean;
+declare function registerRuntimeRelease(options: RegisterRuntimeReleaseOptions): void;
+/** @internal */
+declare function _resetRuntimeReleaseRegistrationForTest(): void;
+
 declare const eventFiltersIntegration: () => {
     name: string;
     processEvent(event: ErrorIngestPayload, client: AllStakClient): ErrorIngestPayload | null;
@@ -935,4 +957,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, applyReleaseAutodetect, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, parseGitRelease };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, parseGitRelease, registerRuntimeRelease };

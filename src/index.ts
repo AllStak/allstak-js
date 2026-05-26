@@ -14,6 +14,12 @@ export type { AllStakConfig, ScreenshotArtifact, ScreenshotCaptureOptions } from
 export { applyReleaseAutodetect } from './client';
 export { parseGitRelease, detectGitRelease, isNodeRuntime } from './release-detect';
 export type { GitRunner } from './release-detect';
+export {
+  registerRuntimeRelease,
+  canRegisterRuntimeRelease,
+  _resetRuntimeReleaseRegistrationForTest,
+  type RegisterRuntimeReleaseOptions,
+} from './release-registration';
 export type { AllStakIntegration, IntegrationIndex, IntegrationOption } from './integration';
 export { defineIntegration } from './integration';
 export { eventFiltersIntegration, inboundFiltersIntegration } from './integrations/event-filters';

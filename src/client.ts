@@ -9,6 +9,7 @@ import { DatabaseModule, DbQueryItem } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
 import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
 import { generateId } from './utils/uuid';
+import { registerRuntimeRelease } from './release-registration';
 import {
   AllStakIntegration,
   IntegrationIndex,
@@ -109,6 +110,12 @@ export interface AllStakConfig extends ReleaseMetadata {
    * version fallback (release may then be left empty).
    */
   autoDetectRelease?: boolean;
+  /**
+   * Register the resolved release with AllStak from the server runtime at SDK
+   * init, without requiring a CI/CD hook. Default true. Browser runtimes are
+   * skipped to avoid one release-registration request per visitor.
+   */
+  autoRegisterRelease?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -352,6 +359,18 @@ export class AllStakClient {
     const { baseUrl, apiKey } = resolveTransport(config);
     this.baseUrl = baseUrl;
     this.transport = new HttpTransport(baseUrl, apiKey);
+    if (config.autoRegisterRelease !== false) {
+      registerRuntimeRelease({
+        host: baseUrl,
+        apiKey,
+        release: config.release,
+        environment: config.environment,
+        commitSha: config.commitSha,
+        branch: config.branch,
+        service: config.tags?.service,
+        enabled: config.autoRegisterRelease,
+      });
+    }
 
     // Auto-capture unhandled errors / rejections in Node. Browser auto-capture
     // is wired separately inside ErrorModule via window event listeners.

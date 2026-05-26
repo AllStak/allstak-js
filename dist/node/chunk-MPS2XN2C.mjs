@@ -1,10 +1,14 @@
+import { createRequire as __allstakCreateRequire } from 'node:module';
+const require = __allstakCreateRequire(import.meta.url);
 import {
-  __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-KENGFPTD.mjs";
+} from "./chunk-2Z2PH3DC.mjs";
+import {
+  __require
+} from "./chunk-6GVGKK5H.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -1521,7 +1525,7 @@ var TracingModule = class {
 };
 function createAsyncTraceStorage() {
   const proc = globalThis.process;
-  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
+  if (false) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -1595,6 +1599,55 @@ function enableDbAutoInstrumentation(dbModule, config) {
   instrumentPg(dbModule, config);
   instrumentMysql2(dbModule, config);
   instrumentSqlite(dbModule, config);
+}
+
+// src/release-registration.ts
+var registered = /* @__PURE__ */ new Set();
+var SDK_NAME2 = "allstak-js";
+var SDK_VERSION2 = "0.2.4";
+function canRegisterRuntimeRelease() {
+  return typeof window === "undefined" && typeof process !== "undefined" && !!process.versions?.node;
+}
+function registerRuntimeRelease(options) {
+  if (options.enabled === false) return;
+  if (options.enabled !== true && isTestRuntime()) return;
+  const release = options.release?.trim();
+  if (options.enabled !== true && !canRegisterRuntimeRelease()) return;
+  if (!options.apiKey || !release) return;
+  const environment = options.environment || "production";
+  const key = `${options.host}|${options.apiKey}|${environment}|${release}`;
+  if (registered.has(key)) return;
+  registered.add(key);
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== "function") return;
+  const payload = {
+    version: release,
+    environment,
+    commitSha: options.commitSha,
+    branch: options.branch,
+    author: `${SDK_NAME2}/${SDK_VERSION2}`,
+    message: "Registered automatically by AllStak SDK at runtime"
+  };
+  if (options.service) payload.service = options.service;
+  void fetchImpl(`${options.host.replace(/\/$/, "")}/ingest/v1/releases`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-AllStak-Key": options.apiKey,
+      "User-Agent": `${SDK_NAME2}/${SDK_VERSION2}`
+    },
+    body: JSON.stringify(payload)
+  }).catch(() => void 0);
+}
+function isTestRuntime() {
+  try {
+    return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+  } catch {
+    return false;
+  }
+}
+function _resetRuntimeReleaseRegistrationForTest() {
+  registered.clear();
 }
 
 // src/integration.ts
@@ -2492,6 +2545,18 @@ var AllStakClient = class {
     const { baseUrl, apiKey } = resolveTransport(config);
     this.baseUrl = baseUrl;
     this.transport = new HttpTransport(baseUrl, apiKey);
+    if (config.autoRegisterRelease !== false) {
+      registerRuntimeRelease({
+        host: baseUrl,
+        apiKey,
+        release: config.release,
+        environment: config.environment,
+        commitSha: config.commitSha,
+        branch: config.branch,
+        service: config.tags?.service,
+        enabled: config.autoRegisterRelease
+      });
+    }
     if (config.autoNodeErrorCapture !== false && typeof process !== "undefined" && typeof window === "undefined") {
       this.installNodeErrorHandlers();
     }
@@ -2537,7 +2602,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
+    return true;
   }
   isNodeRuntime() {
     return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
@@ -3023,7 +3088,7 @@ var AllStakClient = class {
 };
 function createAsyncScopeStorage() {
   const proc = globalThis.process;
-  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
+  if (false) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -3230,6 +3295,9 @@ export {
   redactHeaderRecord,
   Span,
   DatabaseModule,
+  canRegisterRuntimeRelease,
+  registerRuntimeRelease,
+  _resetRuntimeReleaseRegistrationForTest,
   defineIntegration,
   consoleIntegration,
   databaseIntegration,
@@ -3241,9 +3309,8 @@ export {
   isNodeRuntime,
   detectGitRelease,
   Scope,
-  SDK_VERSION,
   applyReleaseAutodetect,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-MVYIKRM6.mjs.map
+//# sourceMappingURL=chunk-MPS2XN2C.mjs.map

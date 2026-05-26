@@ -2072,6 +2072,52 @@ function enableDbAutoInstrumentation(dbModule, config) {
   instrumentSqlite(dbModule, config);
 }
 
+// src/release-registration.ts
+var registered = /* @__PURE__ */ new Set();
+var SDK_NAME2 = "allstak-js";
+var SDK_VERSION2 = "0.2.4";
+function canRegisterRuntimeRelease() {
+  return typeof window === "undefined" && typeof process !== "undefined" && !!process.versions?.node;
+}
+function registerRuntimeRelease(options) {
+  if (options.enabled === false) return;
+  if (options.enabled !== true && isTestRuntime()) return;
+  const release = options.release?.trim();
+  if (options.enabled !== true && !canRegisterRuntimeRelease()) return;
+  if (!options.apiKey || !release) return;
+  const environment = options.environment || "production";
+  const key = `${options.host}|${options.apiKey}|${environment}|${release}`;
+  if (registered.has(key)) return;
+  registered.add(key);
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== "function") return;
+  const payload = {
+    version: release,
+    environment,
+    commitSha: options.commitSha,
+    branch: options.branch,
+    author: `${SDK_NAME2}/${SDK_VERSION2}`,
+    message: "Registered automatically by AllStak SDK at runtime"
+  };
+  if (options.service) payload.service = options.service;
+  void fetchImpl(`${options.host.replace(/\/$/, "")}/ingest/v1/releases`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-AllStak-Key": options.apiKey,
+      "User-Agent": `${SDK_NAME2}/${SDK_VERSION2}`
+    },
+    body: JSON.stringify(payload)
+  }).catch(() => void 0);
+}
+function isTestRuntime() {
+  try {
+    return process.env.VITEST === "true";
+  } catch {
+    return false;
+  }
+}
+
 // src/integration.ts
 var installedOnce = /* @__PURE__ */ new Set();
 function defineIntegration(factory) {
@@ -2966,6 +3012,18 @@ var AllStakClient = class {
     const { baseUrl, apiKey } = resolveTransport(config);
     this.baseUrl = baseUrl;
     this.transport = new HttpTransport(baseUrl, apiKey);
+    if (config.autoRegisterRelease !== false) {
+      registerRuntimeRelease({
+        host: baseUrl,
+        apiKey,
+        release: config.release,
+        environment: config.environment,
+        commitSha: config.commitSha,
+        branch: config.branch,
+        service: config.tags?.service,
+        enabled: config.autoRegisterRelease
+      });
+    }
     if (config.autoNodeErrorCapture !== false && typeof process !== "undefined" && typeof window === "undefined") {
       this.installNodeErrorHandlers();
     }

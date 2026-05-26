@@ -5,7 +5,9 @@ import {
   DatabaseModule,
   Scope,
   Span,
+  _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
+  canRegisterRuntimeRelease,
   consoleIntegration,
   databaseIntegration,
   dedupeIntegration,
@@ -16,8 +18,9 @@ import {
   inboundFiltersIntegration,
   isNodeRuntime,
   parseGitRelease,
+  registerRuntimeRelease,
   src_default
-} from "./chunk-FUPWS3LN.mjs";
+} from "./chunk-MPS2XN2C.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 export {
@@ -25,7 +28,9 @@ export {
   DatabaseModule,
   Scope,
   Span,
+  _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
+  canRegisterRuntimeRelease,
   consoleIntegration,
   databaseIntegration,
   dedupeIntegration,
@@ -36,6 +41,7 @@ export {
   httpClientIntegration,
   inboundFiltersIntegration,
   isNodeRuntime,
-  parseGitRelease
+  parseGitRelease,
+  registerRuntimeRelease
 };
 //# sourceMappingURL=index.mjs.map
