@@ -33,6 +33,31 @@ export interface SpanOptions {
 export type SpanProcessor = (span: SpanData) => SpanData | null | undefined;
 export type SpanFilterPattern = string | RegExp | ((span: SpanData) => boolean);
 
+/**
+ * Context passed to {@link AllStakConfig.tracesSampler} when deciding whether a
+ * trace is sampled. The decision is made once, at the root of a trace, and
+ * inherited by all child spans (W3C sticky head-of-trace).
+ */
+export interface SamplingContext {
+  /** Operation name of the root span starting this trace. */
+  name: string;
+  /**
+   * Sampling decision inherited from an incoming `traceparent`, if any.
+   * `true`/`false` when a parent decision was propagated in, otherwise
+   * `undefined` (this service is the head of the trace).
+   */
+  parentSampled?: boolean;
+  /** Attributes/tags supplied to the root span. */
+  attributes: Record<string, string>;
+}
+
+/**
+ * Function form of traces sampling. Receives the {@link SamplingContext} and
+ * returns either a boolean (sampled / not) or a number in [0, 1] used as the
+ * probability of sampling this trace.
+ */
+export type TracesSampler = (context: SamplingContext) => number | boolean;
+
 interface SpanIngestPayload {
   spans: SpanData[];
 }
@@ -45,6 +70,14 @@ export interface TraceState {
   traceId: string | null;
   requestId?: string | null;
   spanStack: string[];
+  /**
+   * Sticky head-of-trace sampling decision for this trace. `null`/`undefined`
+   * means "not yet decided" — the first span to start in this context computes
+   * it and all later spans in the same trace inherit it.
+   */
+  sampled?: boolean | null;
+  /** Sampling decision inherited from an incoming `traceparent`, if any. */
+  parentSampled?: boolean;
 }
 
 interface AsyncTraceStorage {
@@ -200,6 +233,8 @@ export class TracingModule {
   private spanProcessors: SpanProcessor[] = [];
   private beforeSendSpan?: SpanProcessor;
   private ignoreSpans: SpanFilterPattern[];
+  private tracesSampleRate?: number;
+  private tracesSampler?: TracesSampler;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -210,6 +245,8 @@ export class TracingModule {
       platform?: string;
       beforeSendSpan?: SpanProcessor;
       ignoreSpans?: SpanFilterPattern[];
+      tracesSampleRate?: number;
+      tracesSampler?: TracesSampler;
     },
   ) {
     this.transport = transport;
@@ -218,6 +255,8 @@ export class TracingModule {
     this.platform = config.platform || '';
     this.beforeSendSpan = config.beforeSendSpan;
     this.ignoreSpans = config.ignoreSpans ?? [];
+    this.tracesSampleRate = config.tracesSampleRate;
+    this.tracesSampler = config.tracesSampler;
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS);
     if (typeof this.flushTimer === 'object' && typeof this.flushTimer.unref === 'function') {
       this.flushTimer.unref();
@@ -247,11 +286,34 @@ export class TracingModule {
       if (requestId) this.globalState.requestId = requestId;
       return callback();
     }
-    return this.asyncStorage.run({ traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [] }, callback);
+    return this.asyncStorage.run(
+      { traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [], sampled: null },
+      callback,
+    );
   }
 
   private state(): TraceState {
     return this.asyncStorage?.getStore() ?? this.globalState;
+  }
+
+  /**
+   * Record the sampling decision inherited from an incoming `traceparent`.
+   * Surfaced to {@link TracesSampler} as `parentSampled`; when no
+   * `tracesSampler`/`tracesSampleRate` is configured this has no effect on the
+   * local decision (back-compat: tracing stays always-on).
+   */
+  setParentSampled(parentSampled: boolean | undefined): void {
+    this.state().parentSampled = parentSampled;
+  }
+
+  /**
+   * The sticky head-of-trace sampling decision for the current trace. Returns
+   * `true` when undecided so propagation/recording stay in the historical
+   * always-sampled behavior until a decision is forced.
+   */
+  getSampled(): boolean {
+    const sampled = this.state().sampled;
+    return sampled === undefined || sampled === null ? true : sampled;
   }
 
   /** Get the current trace ID, creating one if none exists. */
@@ -297,6 +359,13 @@ export class TracingModule {
     const parentSpanId = this.getCurrentSpanId() || '';
     const traceId = this.getTraceId();
 
+    // Sticky head-of-trace decision: computed once (at the root span) using the
+    // root span's name/attributes, then inherited by every child span.
+    const recorded = this.ensureSamplingDecision(operation, {
+      ...(options?.tags || {}),
+      ...(options?.attributes || {}),
+    });
+
     state.spanStack.push(spanId);
 
     const span = new Span({
@@ -316,6 +385,8 @@ export class TracingModule {
       onFinish: (spanData: SpanData) => {
         const idx = state.spanStack.indexOf(spanId);
         if (idx >= 0) state.spanStack.splice(idx, 1);
+        // Unsampled traces are dropped before any processor/transport work.
+        if (!recorded) return;
         const finalSpan = this.processSpan(spanData);
         if (finalSpan) this.completedSpans.push(finalSpan);
         if (this.completedSpans.length >= BATCH_SIZE_THRESHOLD) {
@@ -341,6 +412,49 @@ export class TracingModule {
     state.traceId = null;
     state.requestId = null;
     state.spanStack = [];
+    state.sampled = null;
+    state.parentSampled = undefined;
+  }
+
+  /**
+   * Resolve (and memoize) the sticky head-of-trace sampling decision for the
+   * current trace.
+   *
+   * Precedence:
+   * 1. A decision already made for this trace is reused (sticky inheritance).
+   * 2. `tracesSampler(context)` — return value coerced to a decision.
+   * 3. `tracesSampleRate` — probabilistic.
+   * 4. Neither configured → `true` (BACK-COMPAT default: existing users who set
+   *    nothing keep full tracing; we never silently disable it).
+   */
+  private ensureSamplingDecision(operation: string, attributes: Record<string, string>): boolean {
+    const state = this.state();
+    if (state.sampled === true || state.sampled === false) return state.sampled;
+
+    let decision: boolean;
+    if (this.tracesSampler) {
+      const context: SamplingContext = {
+        name: operation,
+        parentSampled: state.parentSampled,
+        attributes,
+      };
+      let result: number | boolean;
+      try {
+        result = this.tracesSampler(context);
+      } catch {
+        // A throwing sampler must not break tracing — fall back to "sampled".
+        result = true;
+      }
+      decision = typeof result === 'number' ? rollSample(result) : !!result;
+    } else if (typeof this.tracesSampleRate === 'number') {
+      decision = rollSample(this.tracesSampleRate);
+    } else {
+      // Back-compat: no traces sampling configured → keep current behavior.
+      decision = true;
+    }
+
+    state.sampled = decision;
+    return decision;
   }
 
   /** Stop the flush timer and do a final flush. */
@@ -399,6 +513,15 @@ function createAsyncTraceStorage(): AsyncTraceStorage | null {
   } catch {
     return null;
   }
+}
+
+/** Coerce a sample rate in [0, 1] into a boolean decision. */
+function rollSample(rate: number): boolean {
+  if (!(typeof rate === 'number') || Number.isNaN(rate)) return true;
+  const clamped = Math.max(0, Math.min(1, rate));
+  if (clamped >= 1) return true;
+  if (clamped <= 0) return false;
+  return Math.random() < clamped;
 }
 
 function inferOp(operation: string): string {

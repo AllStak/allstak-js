@@ -4,7 +4,7 @@ import {
   AllStak,
   redactHeaderRecord,
   redactValue
-} from "./chunk-HEC2EVIY.mjs";
+} from "./chunk-LCAHX5SR.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 
@@ -77,7 +77,9 @@ var allstakExpress = {
       } catch {
       }
       const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
+      const upstreamSampled = sampledFromTraceparent(firstHeader(req.headers["traceparent"]));
       sdk.withTraceContext(upstreamTrace, requestId, () => {
+        sdk.setParentSampled(upstreamSampled);
         const traceId = sdk.getTraceId();
         let rootSpan = null;
         try {
@@ -203,6 +205,12 @@ function traceIdFromTraceparent(header) {
   if (!header) return void 0;
   const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
   return match?.[1];
+}
+function sampledFromTraceparent(header) {
+  if (!header) return void 0;
+  const match = /^00-[0-9a-f]{32}-[0-9a-f]{16}-([0-9a-f]{2})$/i.exec(header.trim());
+  if (!match) return void 0;
+  return (parseInt(match[1], 16) & 1) === 1;
 }
 function generateRequestId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();

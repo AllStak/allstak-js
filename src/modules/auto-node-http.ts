@@ -58,6 +58,12 @@ export function instrumentNodeHttp(
   ownBaseUrl: string,
   getTraceId?: () => string | undefined,
   tracePropagationTargets?: TracePropagationTarget[],
+  /**
+   * Supplies the sticky head-of-trace sampling decision and the active span id
+   * for outbound propagation. When omitted, propagation keeps the historical
+   * always-sampled, requestId-derived parent behavior.
+   */
+  getActiveTraceContext?: () => { sampled?: boolean; spanId?: string } | undefined,
 ): () => void {
   const restorers: Array<() => void> = [];
 
@@ -129,7 +135,11 @@ export function instrumentNodeHttp(
           // Array (raw header pairs) form is excluded by the guard above.
           const existingHeaders = options.headers as OutgoingHttpHeaders | undefined;
           const headers: OutgoingHttpHeaders = Object.assign({}, existingHeaders);
-          applyTracePropagationToHeaders(headers, traceId, newRequestId());
+          const activeCtx = getActiveTraceContext ? getActiveTraceContext() : undefined;
+          applyTracePropagationToHeaders(headers, traceId, newRequestId(), {
+            sampled: activeCtx?.sampled,
+            spanId: activeCtx?.spanId,
+          });
           const nextOptions: RequestOptions = Object.assign({}, options, { headers });
           // Rebuild args so the (possibly newly-created) options object is passed,
           // preserving the original url/callback arguments.

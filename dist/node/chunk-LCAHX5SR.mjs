@@ -43,6 +43,15 @@ var REQUEST_TIMEOUT = 2e3;
 var FAILURE_THRESHOLD = 3;
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 3e4;
+var RETRY_AFTER_MAX_MS = 3e5;
+var HttpResponseError = class extends Error {
+  constructor(status, retryAfter) {
+    super(`HTTP ${status}`);
+    this.status = status;
+    this.retryAfter = retryAfter;
+    this.name = "HttpResponseError";
+  }
+};
 var HttpTransport = class {
   constructor(baseUrl, apiKey) {
     this.baseUrl = baseUrl;
@@ -99,7 +108,7 @@ var HttpTransport = class {
         signal: controller.signal
       });
       clearTimeout(timeoutId);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new HttpResponseError(res.status, res.headers.get("Retry-After"));
       return res;
     } catch (err) {
       clearTimeout(timeoutId);
@@ -148,9 +157,9 @@ var HttpTransport = class {
   recordFailure(error) {
     this.consecutiveFailures++;
     if (this.consecutiveFailures < FAILURE_THRESHOLD) return;
-    const retryAfterMs = retryAfterFromError(error);
-    const backoff = retryAfterMs ?? jitteredBackoff(this.consecutiveFailures);
-    this.circuitOpenUntil = Date.now() + backoff;
+    const backoff = jitteredBackoff(this.consecutiveFailures);
+    const retryAfterMs = retryAfterFromResponse(error);
+    this.circuitOpenUntil = Date.now() + (retryAfterMs > 0 ? retryAfterMs : backoff);
   }
   getBufferSize() {
     return this.buffer.size;
@@ -190,10 +199,29 @@ function jitteredBackoff(failures) {
   const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(8, failures - FAILURE_THRESHOLD));
   return Math.floor(exp / 2 + Math.random() * (exp / 2));
 }
-function retryAfterFromError(error) {
-  const message = error instanceof Error ? error.message : "";
-  const match = /HTTP\s+(429|503)/.exec(message);
-  return match ? BACKOFF_MAX_MS : null;
+function retryAfterFromResponse(error) {
+  if (!(error instanceof HttpResponseError)) return 0;
+  if (error.status !== 429 && error.status !== 503) return 0;
+  return parseRetryAfter(error.retryAfter, Date.now());
+}
+function parseRetryAfter(headerValue, now) {
+  if (headerValue == null) return 0;
+  const value = headerValue.trim();
+  if (value === "") return 0;
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds)) return 0;
+    return clampRetryAfter(seconds * 1e3);
+  }
+  const dateMs = Date.parse(value);
+  if (Number.isNaN(dateMs)) return 0;
+  const delta = dateMs - now;
+  if (delta <= 0) return 0;
+  return clampRetryAfter(delta);
+}
+function clampRetryAfter(ms) {
+  if (ms <= 0) return 0;
+  return Math.min(ms, RETRY_AFTER_MAX_MS);
 }
 
 // src/utils/stack.ts
@@ -1299,6 +1327,8 @@ var TracingModule = class {
     this.platform = config.platform || "";
     this.beforeSendSpan = config.beforeSendSpan;
     this.ignoreSpans = config.ignoreSpans ?? [];
+    this.tracesSampleRate = config.tracesSampleRate;
+    this.tracesSampler = config.tracesSampler;
     this.flushTimer = setInterval(() => this.flush(), FLUSH_INTERVAL_MS3);
     if (typeof this.flushTimer === "object" && typeof this.flushTimer.unref === "function") {
       this.flushTimer.unref();
@@ -1315,10 +1345,31 @@ var TracingModule = class {
       if (requestId) this.globalState.requestId = requestId;
       return callback();
     }
-    return this.asyncStorage.run({ traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [] }, callback);
+    return this.asyncStorage.run(
+      { traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [], sampled: null },
+      callback
+    );
   }
   state() {
     return this.asyncStorage?.getStore() ?? this.globalState;
+  }
+  /**
+   * Record the sampling decision inherited from an incoming `traceparent`.
+   * Surfaced to {@link TracesSampler} as `parentSampled`; when no
+   * `tracesSampler`/`tracesSampleRate` is configured this has no effect on the
+   * local decision (back-compat: tracing stays always-on).
+   */
+  setParentSampled(parentSampled) {
+    this.state().parentSampled = parentSampled;
+  }
+  /**
+   * The sticky head-of-trace sampling decision for the current trace. Returns
+   * `true` when undecided so propagation/recording stay in the historical
+   * always-sampled behavior until a decision is forced.
+   */
+  getSampled() {
+    const sampled = this.state().sampled;
+    return sampled === void 0 || sampled === null ? true : sampled;
   }
   /** Get the current trace ID, creating one if none exists. */
   getTraceId() {
@@ -1352,6 +1403,10 @@ var TracingModule = class {
     const spanId = generateId().replace(/-/g, "");
     const parentSpanId = this.getCurrentSpanId() || "";
     const traceId = this.getTraceId();
+    const recorded = this.ensureSamplingDecision(operation, {
+      ...options?.tags || {},
+      ...options?.attributes || {}
+    });
     state.spanStack.push(spanId);
     const span = new Span({
       traceId,
@@ -1370,6 +1425,7 @@ var TracingModule = class {
       onFinish: (spanData) => {
         const idx = state.spanStack.indexOf(spanId);
         if (idx >= 0) state.spanStack.splice(idx, 1);
+        if (!recorded) return;
         const finalSpan = this.processSpan(spanData);
         if (finalSpan) this.completedSpans.push(finalSpan);
         if (this.completedSpans.length >= BATCH_SIZE_THRESHOLD3) {
@@ -1392,6 +1448,44 @@ var TracingModule = class {
     state.traceId = null;
     state.requestId = null;
     state.spanStack = [];
+    state.sampled = null;
+    state.parentSampled = void 0;
+  }
+  /**
+   * Resolve (and memoize) the sticky head-of-trace sampling decision for the
+   * current trace.
+   *
+   * Precedence:
+   * 1. A decision already made for this trace is reused (sticky inheritance).
+   * 2. `tracesSampler(context)` — return value coerced to a decision.
+   * 3. `tracesSampleRate` — probabilistic.
+   * 4. Neither configured → `true` (BACK-COMPAT default: existing users who set
+   *    nothing keep full tracing; we never silently disable it).
+   */
+  ensureSamplingDecision(operation, attributes) {
+    const state = this.state();
+    if (state.sampled === true || state.sampled === false) return state.sampled;
+    let decision;
+    if (this.tracesSampler) {
+      const context = {
+        name: operation,
+        parentSampled: state.parentSampled,
+        attributes
+      };
+      let result;
+      try {
+        result = this.tracesSampler(context);
+      } catch {
+        result = true;
+      }
+      decision = typeof result === "number" ? rollSample(result) : !!result;
+    } else if (typeof this.tracesSampleRate === "number") {
+      decision = rollSample(this.tracesSampleRate);
+    } else {
+      decision = true;
+    }
+    state.sampled = decision;
+    return decision;
   }
   /** Stop the flush timer and do a final flush. */
   destroy() {
@@ -1430,14 +1524,24 @@ var TracingModule = class {
   }
 };
 function createAsyncTraceStorage() {
+  const proc = globalThis.process;
   if (false) return null;
   try {
+    const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
+    if (fromProcess) return new fromProcess();
     const req = typeof __require === "function" ? __require : void 0;
     const AsyncLocalStorage = req?.("node:async_hooks").AsyncLocalStorage;
     return AsyncLocalStorage ? new AsyncLocalStorage() : null;
   } catch {
     return null;
   }
+}
+function rollSample(rate) {
+  if (!(typeof rate === "number") || Number.isNaN(rate)) return true;
+  const clamped = Math.max(0, Math.min(1, rate));
+  if (clamped >= 1) return true;
+  if (clamped <= 0) return false;
+  return Math.random() < clamped;
 }
 function inferOp(operation) {
   const trimmed = operation.trim();
@@ -1553,6 +1657,72 @@ function filterDuplicateIntegrations(integrations) {
   return Object.values(byName);
 }
 
+// src/modules/trace-propagation.ts
+function normalizeTraceId(traceId) {
+  return traceId.replace(/-/g, "").slice(0, 32).padEnd(32, "0");
+}
+function normalizeSpanId(spanId) {
+  return spanId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
+}
+function mergeBaggageValue(existing, baggage) {
+  const preserved = existing.split(",").map((part) => part.trim()).filter((part) => part && !part.toLowerCase().startsWith("allstak-"));
+  return [...preserved, ...baggage.split(",")].join(",");
+}
+function tracePropagationValues(traceId, requestId, options) {
+  const sampled = options?.sampled !== false;
+  const rawSpanId = options?.spanId && options.spanId.length > 0 ? options.spanId : requestId;
+  const spanId = normalizeSpanId(rawSpanId.replace(/-/g, ""));
+  const flag = sampled ? "01" : "00";
+  const traceparent = `00-${normalizeTraceId(traceId)}-${spanId}-${flag}`;
+  const baggage = [
+    `allstak-trace_id=${encodeURIComponent(traceId)}`,
+    `allstak-span_id=${encodeURIComponent(spanId)}`,
+    `allstak-request_id=${encodeURIComponent(requestId)}`
+  ].join(",");
+  return { traceparent, allstakTrace: `${traceId}-${spanId}-${sampled ? "1" : "0"}`, baggage, traceId, requestId };
+}
+function findKey(headers, name) {
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lower) return key;
+  }
+  return void 0;
+}
+function setIfMissing(headers, name, value) {
+  if (!findKey(headers, name)) headers[name] = value;
+}
+function mergeBaggageInto(headers, name, baggage) {
+  const key = findKey(headers, name);
+  if (!key) {
+    headers[name] = baggage;
+    return;
+  }
+  const existing = headers[key];
+  const existingStr = Array.isArray(existing) ? existing.join(",") : String(existing ?? "");
+  headers[key] = mergeBaggageValue(existingStr, baggage);
+}
+function applyTracePropagationToHeaders(headers, traceId, requestId, options) {
+  const p = tracePropagationValues(traceId, requestId, options);
+  setIfMissing(headers, "traceparent", p.traceparent);
+  setIfMissing(headers, "allstak-trace", p.allstakTrace);
+  mergeBaggageInto(headers, "allstak-baggage", p.baggage);
+  mergeBaggageInto(headers, "baggage", p.baggage);
+  setIfMissing(headers, "x-allstak-trace-id", p.traceId);
+  setIfMissing(headers, "x-allstak-request-id", p.requestId);
+}
+function targetMatches(url, targets) {
+  if (!targets || targets.length === 0) return true;
+  return targets.some((target) => typeof target === "string" ? url.includes(target) : target.test(url));
+}
+function newRequestId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
+
 // src/modules/auto-breadcrumbs.ts
 function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext, bodyCapture, tracePropagationTargets) {
   if (typeof globalThis.fetch !== "function") return;
@@ -1565,8 +1735,11 @@ function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext
     const correlation = !isOwnIngest ? traceContext?.() : void 0;
     const requestId = correlation?.requestId ?? generateRequestId();
     const traceId = correlation?.traceId;
-    const shouldPropagate = !isOwnIngest && traceId && targetMatches(url, tracePropagationTargets);
-    const propagatedInit = shouldPropagate ? withTraceHeaders(input, init, traceId, requestId) : init;
+    const shouldPropagate = !isOwnIngest && traceId && targetMatches2(url, tracePropagationTargets);
+    const propagatedInit = shouldPropagate ? withTraceHeaders(input, init, traceId, requestId, {
+      sampled: correlation?.sampled,
+      spanId: correlation?.spanId
+    }) : init;
     let host = "";
     let path = safePath;
     try {
@@ -1731,22 +1904,25 @@ function generateRequestId() {
     return v.toString(16);
   });
 }
-function targetMatches(url, targets) {
+function targetMatches2(url, targets) {
   if (!targets || targets.length === 0) return true;
   return targets.some((target) => typeof target === "string" ? url.includes(target) : target.test(url));
 }
-function withTraceHeaders(input, init, traceId, requestId) {
+function withTraceHeaders(input, init, traceId, requestId, options) {
   const next = { ...init ?? {} };
   const headers = new Headers(init?.headers ?? requestHeadersFromInput(input));
-  const spanId = requestId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
-  const traceparent = `00-${normalizeTraceId(traceId)}-${normalizeSpanId(spanId)}-01`;
+  const sampled = options?.sampled !== false;
+  const rawSpanId = options?.spanId && options.spanId.length > 0 ? options.spanId : requestId;
+  const spanId = normalizeSpanId(rawSpanId.replace(/-/g, ""));
+  const flag = sampled ? "01" : "00";
+  const traceparent = `00-${normalizeTraceId(traceId)}-${spanId}-${flag}`;
   const baggage = [
     `allstak-trace_id=${encodeURIComponent(traceId)}`,
     `allstak-span_id=${encodeURIComponent(spanId)}`,
     `allstak-request_id=${encodeURIComponent(requestId)}`
   ].join(",");
   setHeaderIfMissing(headers, "traceparent", traceparent);
-  setHeaderIfMissing(headers, "allstak-trace", `${traceId}-${spanId}-1`);
+  setHeaderIfMissing(headers, "allstak-trace", `${traceId}-${spanId}-${sampled ? "1" : "0"}`);
   mergeAllStakBaggage(headers, baggage);
   setHeaderIfMissing(headers, "x-allstak-trace-id", traceId);
   setHeaderIfMissing(headers, "x-allstak-request-id", requestId);
@@ -1764,21 +1940,15 @@ function mergeAllStakBaggage(headers, baggage) {
   const allstakBaggage = headers.get("allstak-baggage");
   if (!allstakBaggage) {
     headers.set("allstak-baggage", baggage);
-  } else if (!allstakBaggage.includes("allstak-trace_id=")) {
-    headers.set("allstak-baggage", `${allstakBaggage},${baggage}`);
+  } else {
+    headers.set("allstak-baggage", mergeBaggageValue(allstakBaggage, baggage));
   }
   const standardBaggage = headers.get("baggage");
   if (!standardBaggage) {
     headers.set("baggage", baggage);
-  } else if (!standardBaggage.includes("allstak-trace_id=")) {
-    headers.set("baggage", `${standardBaggage},${baggage}`);
+  } else {
+    headers.set("baggage", mergeBaggageValue(standardBaggage, baggage));
   }
-}
-function normalizeTraceId(traceId) {
-  return traceId.replace(/-/g, "").slice(0, 32).padEnd(32, "0");
-}
-function normalizeSpanId(spanId) {
-  return spanId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
 }
 function instrumentConsole(addBreadcrumb) {
   if (typeof console === "undefined") return;
@@ -1921,7 +2091,7 @@ function isAlreadyPatched(mod) {
 function markPatched(mod) {
   mod[PATCHED_FLAG] = true;
 }
-function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl) {
+function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl, getTraceId, tracePropagationTargets, getActiveTraceContext) {
   const restorers = [];
   for (const protocol of ["http", "https"]) {
     let mod;
@@ -1965,8 +2135,29 @@ function instrumentNodeHttp(capture, addBreadcrumb, ownBaseUrl) {
       }
       const fullUrl = url || `${protocol}://${host}${path}`;
       const isOwnIngest = ownBaseUrl && fullUrl.startsWith(ownBaseUrl);
+      let callArgs = args;
+      const traceId = getTraceId ? getTraceId() : void 0;
+      if (!isOwnIngest && traceId && !Array.isArray(options.headers) && targetMatches(fullUrl, tracePropagationTargets)) {
+        try {
+          const existingHeaders = options.headers;
+          const headers = Object.assign({}, existingHeaders);
+          const activeCtx = getActiveTraceContext ? getActiveTraceContext() : void 0;
+          applyTracePropagationToHeaders(headers, traceId, newRequestId(), {
+            sampled: activeCtx?.sampled,
+            spanId: activeCtx?.spanId
+          });
+          const nextOptions = Object.assign({}, options, { headers });
+          const rebuilt = [];
+          if (url !== void 0) rebuilt.push(args[0]);
+          rebuilt.push(nextOptions);
+          if (callback) rebuilt.push(callback);
+          callArgs = rebuilt;
+        } catch {
+          callArgs = args;
+        }
+      }
       const start = Date.now();
-      const req = originalRequest(...args);
+      const req = originalRequest(...callArgs);
       req.on("response", (res) => {
         const durationMs = Date.now() - start;
         const status = res.statusCode ?? 0;
@@ -2049,7 +2240,11 @@ var httpClientIntegration = defineIntegration(() => ({
       (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
       (item) => client.captureRequest({ ...item, method: item.method }),
       baseUrl,
-      () => ({ traceId: client.getTraceId() }),
+      () => ({
+        traceId: client.getTraceId(),
+        sampled: client.getTraceSampled(),
+        spanId: client.getCurrentSpanId() ?? void 0
+      }),
       options.httpBodyCapture,
       options.tracePropagationTargets
     );
@@ -2058,7 +2253,13 @@ var httpClientIntegration = defineIntegration(() => ({
         instrumentNodeHttp(
           (item) => client.captureRequest({ ...item, method: item.method }),
           (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
-          baseUrl
+          baseUrl,
+          () => client.getTraceId(),
+          options.tracePropagationTargets,
+          () => ({
+            sampled: client.getTraceSampled(),
+            spanId: client.getCurrentSpanId() ?? void 0
+          })
         );
       } catch {
       }
@@ -2153,7 +2354,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "0.2.3";
+var SDK_VERSION = "0.2.4";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
@@ -2202,7 +2403,8 @@ var AllStakClient = class {
   constructor(config) {
     this.integrations = {};
     this.sessionReplay = null;
-    this.scopeStack = [];
+    this.globalScopeStack = [];
+    this.asyncScopeStorage = createAsyncScopeStorage();
     // ─── Node uncaughtException / unhandledRejection auto-capture ─────
     this.nodeUncaughtHandler = null;
     this.nodeRejectionHandler = null;
@@ -2232,7 +2434,9 @@ var AllStakClient = class {
       environment: config.environment,
       platform: config.platform,
       beforeSendSpan: config.beforeSendSpan,
-      ignoreSpans: config.ignoreSpans
+      ignoreSpans: config.ignoreSpans,
+      tracesSampleRate: config.tracesSampleRate,
+      tracesSampler: config.tracesSampler
     });
     const defaultIntegrations = config.defaultIntegrations === void 0 ? getDefaultIntegrations() : config.defaultIntegrations;
     this.integrations = setupIntegrations(
@@ -2276,8 +2480,9 @@ var AllStakClient = class {
     );
   }
   withScopedConfig(work) {
-    if (this.scopeStack.length === 0) return work();
-    const eff = mergeScopes(this.config, this.scopeStack);
+    const stack = this.scopeStack();
+    if (stack.length === 0) return work();
+    const eff = mergeScopes(this.config, stack);
     const snap = {
       user: this.config.user,
       tags: this.config.tags,
@@ -2303,14 +2508,21 @@ var AllStakClient = class {
       this.config.level = snap.level;
     }
   }
+  scopeStack() {
+    return this.asyncScopeStorage?.getStore() ?? this.globalScopeStack;
+  }
   withScope(callback) {
     const scope = new Scope();
-    this.scopeStack.push(scope);
+    if (this.asyncScopeStorage) {
+      const parent = this.scopeStack();
+      return this.asyncScopeStorage.run([...parent, scope], () => callback(scope));
+    }
+    this.globalScopeStack.push(scope);
     let popped = false;
     const pop = () => {
       if (!popped) {
         popped = true;
-        this.scopeStack.pop();
+        this.globalScopeStack.pop();
       }
     };
     try {
@@ -2335,7 +2547,24 @@ var AllStakClient = class {
     }
   }
   getCurrentScope() {
-    return this.scopeStack[this.scopeStack.length - 1] ?? null;
+    const stack = this.scopeStack();
+    return stack[stack.length - 1] ?? null;
+  }
+  configureScope(callback) {
+    const current = this.getCurrentScope();
+    if (current) {
+      callback(current);
+      return;
+    }
+    const scope = new Scope();
+    callback(scope);
+    const eff = mergeScopes(this.config, [scope]);
+    this.config.user = eff.user;
+    this.config.tags = eff.tags;
+    this.config.extras = eff.extras;
+    this.config.contexts = eff.contexts;
+    this.config.fingerprint = eff.fingerprint;
+    this.config.level = eff.level;
   }
   addBreadcrumb(typeOrCrumb, message, level, data) {
     if (typeof typeOrCrumb === "object") {
@@ -2603,6 +2832,22 @@ var AllStakClient = class {
   getCurrentSpanId() {
     return this.tracing.getCurrentSpanId();
   }
+  /**
+   * The sticky head-of-trace sampling decision for the current trace. Drives
+   * the propagated `traceparent` sampled flag. Returns `true` when no decision
+   * has been forced yet (back-compat: always-sampled).
+   */
+  getTraceSampled() {
+    return this.tracing.getSampled();
+  }
+  /**
+   * Record the sampling decision inherited from an incoming `traceparent`, so
+   * a configured {@link AllStakConfig.tracesSampler} can honor `parentSampled`.
+   * @internal Used by server framework integrations.
+   */
+  setParentSampled(parentSampled) {
+    this.tracing.setParentSampled(parentSampled);
+  }
   /** Reset trace context (trace ID and span stack). */
   resetTrace() {
     this.tracing.resetTrace();
@@ -2698,6 +2943,19 @@ var AllStakClient = class {
     }
   }
 };
+function createAsyncScopeStorage() {
+  const proc = globalThis.process;
+  if (false) return null;
+  try {
+    const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
+    if (fromProcess) return new fromProcess();
+    const req = typeof __require === "function" ? __require : void 0;
+    const AsyncLocalStorage = req?.("node:async_hooks").AsyncLocalStorage;
+    return AsyncLocalStorage ? new AsyncLocalStorage() : null;
+  } catch {
+    return null;
+  }
+}
 function byteSize(value) {
   if (!value) return 0;
   try {
@@ -2828,6 +3086,12 @@ var AllStak = {
   withScope(callback) {
     return ensureInit().withScope(callback);
   },
+  getCurrentScope() {
+    return ensureInit().getCurrentScope();
+  },
+  configureScope(callback) {
+    ensureInit().configureScope(callback);
+  },
   getSessionId() {
     return ensureInit().getSessionId();
   },
@@ -2899,4 +3163,4 @@ export {
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-HEC2EVIY.mjs.map
+//# sourceMappingURL=chunk-LCAHX5SR.mjs.map

@@ -211,6 +211,29 @@ interface SpanOptions {
 }
 type SpanProcessor = (span: SpanData) => SpanData | null | undefined;
 type SpanFilterPattern = string | RegExp | ((span: SpanData) => boolean);
+/**
+ * Context passed to {@link AllStakConfig.tracesSampler} when deciding whether a
+ * trace is sampled. The decision is made once, at the root of a trace, and
+ * inherited by all child spans (W3C sticky head-of-trace).
+ */
+interface SamplingContext {
+    /** Operation name of the root span starting this trace. */
+    name: string;
+    /**
+     * Sampling decision inherited from an incoming `traceparent`, if any.
+     * `true`/`false` when a parent decision was propagated in, otherwise
+     * `undefined` (this service is the head of the trace).
+     */
+    parentSampled?: boolean;
+    /** Attributes/tags supplied to the root span. */
+    attributes: Record<string, string>;
+}
+/**
+ * Function form of traces sampling. Receives the {@link SamplingContext} and
+ * returns either a boolean (sampled / not) or a number in [0, 1] used as the
+ * probability of sampling this trace.
+ */
+type TracesSampler = (context: SamplingContext) => number | boolean;
 declare global {
     var __ALLSTAK_NODE__: boolean | undefined;
 }
@@ -434,6 +457,25 @@ interface AllStakConfig extends ReleaseMetadata {
      */
     ignoreSpans?: SpanFilterPattern[];
     /**
+     * Probability in [0, 1] that any given trace is sampled (recorded + sent).
+     * The decision is made ONCE at the root span and inherited by every child
+     * span in the trace (W3C sticky head-of-trace), and it drives the propagated
+     * `traceparent` sampled flag (`-01` sampled / `-00` not).
+     *
+     * BACK-COMPAT DEFAULT: when neither {@link tracesSampleRate} nor
+     * {@link tracesSampler} is set, tracing stays fully on (every trace sampled)
+     * and propagation advertises `-01`, matching the SDK's historical behavior.
+     * Setting this to `0` disables trace recording; `1` records everything.
+     */
+    tracesSampleRate?: number;
+    /**
+     * Function form of traces sampling. Receives a {@link SamplingContext}
+     * (`name`, `parentSampled`, `attributes`) and returns a boolean or a number
+     * in [0, 1]. Takes precedence over {@link tracesSampleRate} when set. A
+     * throwing sampler fails open (the trace is sampled).
+     */
+    tracesSampler?: TracesSampler;
+    /**
      * Default integrations. Set false to disable all built-in integrations, or
      * provide a replacement list.
      */
@@ -493,15 +535,18 @@ declare class AllStakClient {
     private integrations;
     private sessionReplay;
     private sessionId;
-    private scopeStack;
+    private globalScopeStack;
+    private asyncScopeStorage;
     constructor(config: AllStakConfig);
     private isNodeBuild;
     isNodeRuntime(): boolean;
     getBaseUrl(): string;
     captureException(error: Error, context?: Record<string, unknown>): void;
     private withScopedConfig;
+    private scopeStack;
     withScope<T>(callback: (scope: Scope) => T): T;
     getCurrentScope(): Scope | null;
+    configureScope(callback: (scope: Scope) => void): void;
     addBreadcrumb(typeOrCrumb: string | {
         type: string;
         message: string;
@@ -630,6 +675,18 @@ declare class AllStakClient {
     setTraceId(traceId: string): void;
     /** Get the current active span ID, or null if no span is active. */
     getCurrentSpanId(): string | null;
+    /**
+     * The sticky head-of-trace sampling decision for the current trace. Drives
+     * the propagated `traceparent` sampled flag. Returns `true` when no decision
+     * has been forced yet (back-compat: always-sampled).
+     */
+    getTraceSampled(): boolean;
+    /**
+     * Record the sampling decision inherited from an incoming `traceparent`, so
+     * a configured {@link AllStakConfig.tracesSampler} can honor `parentSampled`.
+     * @internal Used by server framework integrations.
+     */
+    setParentSampled(parentSampled: boolean | undefined): void;
     /** Reset trace context (trace ID and span stack). */
     resetTrace(): void;
     destroy(): void;
@@ -777,6 +834,8 @@ declare const AllStak: {
      * sync, async, and throwing callbacks.
      */
     withScope<T>(callback: (scope: Scope) => T): T;
+    getCurrentScope(): Scope | null;
+    configureScope(callback: (scope: Scope) => void): void;
     getSessionId(): string;
     getTransportStats(): TransportStats;
     /**
@@ -801,4 +860,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, TransportStats, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration };

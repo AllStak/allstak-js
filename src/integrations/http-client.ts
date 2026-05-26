@@ -13,7 +13,11 @@ export const httpClientIntegration = defineIntegration(() => ({
       (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
       (item) => client.captureRequest({ ...item, method: item.method as any }),
       baseUrl,
-      () => ({ traceId: client.getTraceId() }),
+      () => ({
+        traceId: client.getTraceId(),
+        sampled: client.getTraceSampled(),
+        spanId: client.getCurrentSpanId() ?? undefined,
+      }),
       options.httpBodyCapture,
       options.tracePropagationTargets,
     );
@@ -26,6 +30,10 @@ export const httpClientIntegration = defineIntegration(() => ({
           baseUrl,
           () => client.getTraceId(),
           options.tracePropagationTargets,
+          () => ({
+            sampled: client.getTraceSampled(),
+            spanId: client.getCurrentSpanId() ?? undefined,
+          }),
         );
       } catch {
         // Optional Node patching must never break SDK init.

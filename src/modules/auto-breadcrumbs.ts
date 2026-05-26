@@ -4,7 +4,7 @@
  * These patches are safe: they only wrap if the globals exist and always
  * delegate to the original implementation.
  */
-import { mergeBaggageValue, normalizeSpanId, normalizeTraceId } from './trace-propagation';
+import { mergeBaggageValue, normalizeSpanId, normalizeTraceId, type TracePropagationOptions } from './trace-propagation';
 
 type AddBreadcrumbFn = (
   type: string,
@@ -34,7 +34,9 @@ type CaptureRequestFn = (item: {
   responseBodyCaptureReason?: string;
 }) => void;
 
-type TraceContextFn = () => { traceId?: string; requestId?: string } | undefined;
+type TraceContextFn = () =>
+  | { traceId?: string; requestId?: string; sampled?: boolean; spanId?: string }
+  | undefined;
 
 export type TracePropagationTarget = string | RegExp;
 
@@ -83,7 +85,10 @@ export function instrumentFetch(
     const traceId = correlation?.traceId;
     const shouldPropagate = !isOwnIngest && traceId && targetMatches(url, tracePropagationTargets);
     const propagatedInit = shouldPropagate
-      ? withTraceHeaders(input, init, traceId, requestId)
+      ? withTraceHeaders(input, init, traceId, requestId, {
+          sampled: correlation?.sampled,
+          spanId: correlation?.spanId,
+        })
       : init;
 
     let host = '';
@@ -307,11 +312,16 @@ function withTraceHeaders(
   init: RequestInit | undefined,
   traceId: string,
   requestId: string,
+  options?: TracePropagationOptions,
 ): RequestInit {
   const next: RequestInit = { ...(init ?? {}) };
   const headers = new Headers(init?.headers ?? requestHeadersFromInput(input));
-  const spanId = requestId.replace(/-/g, '').slice(0, 16).padEnd(16, '0');
-  const traceparent = `00-${normalizeTraceId(traceId)}-${normalizeSpanId(spanId)}-01`;
+  const sampled = options?.sampled !== false; // default sampled (back-compat)
+  // Prefer the active span id; fall back to the requestId-derived parent.
+  const rawSpanId = options?.spanId && options.spanId.length > 0 ? options.spanId : requestId;
+  const spanId = normalizeSpanId(rawSpanId.replace(/-/g, ''));
+  const flag = sampled ? '01' : '00';
+  const traceparent = `00-${normalizeTraceId(traceId)}-${spanId}-${flag}`;
   const baggage = [
     `allstak-trace_id=${encodeURIComponent(traceId)}`,
     `allstak-span_id=${encodeURIComponent(spanId)}`,
@@ -319,7 +329,7 @@ function withTraceHeaders(
   ].join(',');
 
   setHeaderIfMissing(headers, 'traceparent', traceparent);
-  setHeaderIfMissing(headers, 'allstak-trace', `${traceId}-${spanId}-1`);
+  setHeaderIfMissing(headers, 'allstak-trace', `${traceId}-${spanId}-${sampled ? '1' : '0'}`);
   mergeAllStakBaggage(headers, baggage);
   setHeaderIfMissing(headers, 'x-allstak-trace-id', traceId);
   setHeaderIfMissing(headers, 'x-allstak-request-id', requestId);

@@ -4,7 +4,7 @@ import { LogModule, LogLevel } from './modules/logs';
 import { SessionReplayModule } from './modules/session-replay';
 import { HttpRequestModule, HttpRequestItem } from './modules/http-requests';
 import { CronModule, HeartbeatOptions } from './modules/cron';
-import { TracingModule, Span, SpanData, SpanFilterPattern, SpanOptions, SpanProcessor } from './modules/tracing';
+import { TracingModule, Span, SpanData, SpanFilterPattern, SpanOptions, SpanProcessor, TracesSampler, SamplingContext } from './modules/tracing';
 import { DatabaseModule, DbQueryItem } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
 import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
@@ -140,6 +140,25 @@ export interface AllStakConfig extends ReleaseMetadata {
    * Drop spans matching an operation/description pattern or predicate.
    */
   ignoreSpans?: SpanFilterPattern[];
+  /**
+   * Probability in [0, 1] that any given trace is sampled (recorded + sent).
+   * The decision is made ONCE at the root span and inherited by every child
+   * span in the trace (W3C sticky head-of-trace), and it drives the propagated
+   * `traceparent` sampled flag (`-01` sampled / `-00` not).
+   *
+   * BACK-COMPAT DEFAULT: when neither {@link tracesSampleRate} nor
+   * {@link tracesSampler} is set, tracing stays fully on (every trace sampled)
+   * and propagation advertises `-01`, matching the SDK's historical behavior.
+   * Setting this to `0` disables trace recording; `1` records everything.
+   */
+  tracesSampleRate?: number;
+  /**
+   * Function form of traces sampling. Receives a {@link SamplingContext}
+   * (`name`, `parentSampled`, `attributes`) and returns a boolean or a number
+   * in [0, 1]. Takes precedence over {@link tracesSampleRate} when set. A
+   * throwing sampler fails open (the trace is sampled).
+   */
+  tracesSampler?: TracesSampler;
   /**
    * Default integrations. Set false to disable all built-in integrations, or
    * provide a replacement list.
@@ -326,6 +345,8 @@ export class AllStakClient {
       platform: config.platform,
       beforeSendSpan: config.beforeSendSpan,
       ignoreSpans: config.ignoreSpans,
+      tracesSampleRate: config.tracesSampleRate,
+      tracesSampler: config.tracesSampler,
     });
 
     const defaultIntegrations = config.defaultIntegrations === undefined
@@ -801,6 +822,24 @@ export class AllStakClient {
     return this.tracing.getCurrentSpanId();
   }
 
+  /**
+   * The sticky head-of-trace sampling decision for the current trace. Drives
+   * the propagated `traceparent` sampled flag. Returns `true` when no decision
+   * has been forced yet (back-compat: always-sampled).
+   */
+  getTraceSampled(): boolean {
+    return this.tracing.getSampled();
+  }
+
+  /**
+   * Record the sampling decision inherited from an incoming `traceparent`, so
+   * a configured {@link AllStakConfig.tracesSampler} can honor `parentSampled`.
+   * @internal Used by server framework integrations.
+   */
+  setParentSampled(parentSampled: boolean | undefined): void {
+    this.tracing.setParentSampled(parentSampled);
+  }
+
   /** Reset trace context (trace ID and span stack). */
   resetTrace(): void {
     this.tracing.resetTrace();
@@ -927,7 +966,7 @@ function createAsyncScopeStorage(): AsyncScopeStorage | null {
 export type { HttpRequestItem } from './modules/http-requests';
 export type { HeartbeatOptions } from './modules/cron';
 export type { LogLevel } from './modules/logs';
-export type { SpanData } from './modules/tracing';
+export type { SpanData, TracesSampler, SamplingContext } from './modules/tracing';
 export { Span } from './modules/tracing';
 export type { DbQueryItem } from './modules/database';
 export { DatabaseModule } from './modules/database';

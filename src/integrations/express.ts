@@ -153,8 +153,11 @@ export const allstakExpress = {
       const upstreamTrace = firstHeader(req.headers['x-allstak-trace-id'])
         ?? firstHeader(req.headers['x-trace-id'])
         ?? traceIdFromTraceparent(firstHeader(req.headers['traceparent']));
+      const upstreamSampled = sampledFromTraceparent(firstHeader(req.headers['traceparent']));
 
       sdk.withTraceContext(upstreamTrace, requestId, () => {
+        // Surface the inbound sampling decision to a configured tracesSampler.
+        sdk.setParentSampled(upstreamSampled);
         const traceId = sdk.getTraceId();
         // Open a root span for this request.
         let rootSpan: Span | null = null;
@@ -300,6 +303,14 @@ function traceIdFromTraceparent(header: string | undefined): string | undefined 
   if (!header) return undefined;
   const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
   return match?.[1];
+}
+
+/** Parse the trace-flags sampled bit (LSB) from an incoming W3C traceparent. */
+function sampledFromTraceparent(header: string | undefined): boolean | undefined {
+  if (!header) return undefined;
+  const match = /^00-[0-9a-f]{32}-[0-9a-f]{16}-([0-9a-f]{2})$/i.exec(header.trim());
+  if (!match) return undefined;
+  return (parseInt(match[1], 16) & 0x01) === 0x01;
 }
 
 function generateRequestId(): string {

@@ -24,7 +24,7 @@ export type { LogEvent, LogLevel } from './modules/logs';
 export type { ReplayEvent, DOMEvent } from './modules/session-replay';
 export type { HttpRequestItem } from './modules/http-requests';
 export type { HeartbeatOptions } from './modules/cron';
-export type { SpanData, SpanOptions, SpanProcessor, SpanFilterPattern } from './modules/tracing';
+export type { SpanData, SpanOptions, SpanProcessor, SpanFilterPattern, TracesSampler, SamplingContext } from './modules/tracing';
 export { Span } from './modules/tracing';
 export type { DbQueryItem } from './modules/database';
 export { DatabaseModule } from './modules/database';
