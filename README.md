@@ -153,7 +153,6 @@ await AllStak.flush();
 | `environment` | Deployment environment, for example `production` or `staging`. |
 | `release` | App version, commit SHA, or build identifier. |
 | `tags` | Tags added to every event. Use `tags.service` for service filtering. |
-| `host` | Optional ingest host override for self-hosted AllStak. |
 | `sampleRate` | Error sample rate from `0` to `1`. |
 | `tracesSampleRate` | Span sample rate from `0` to `1`. |
 | `httpBodyCapture` | Enables request and response body capture with redaction. |
