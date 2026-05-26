@@ -304,6 +304,55 @@ type IntegrationOption = AllStakIntegration[] | ((defaultIntegrations: AllStakIn
 declare function defineIntegration<Fn extends IntegrationFactory>(factory: Fn): Fn;
 
 /**
+ * Local-git RUNTIME release auto-detection (no CI/CD required).
+ *
+ * This module provides a *pure*, testable parse layer plus a fully-guarded
+ * Node-only git runner. It is consumed by `applyReleaseAutodetect` in
+ * `client.ts` as the step that sits *below* explicit config and env-var
+ * detection, and *above* the SDK-version fallback.
+ *
+ * Resolution order for `release` (highest priority first):
+ *   1. Explicit `config.release`            — always wins (handled in client.ts).
+ *   2. Env vars (ALLSTAK_RELEASE, VERCEL_GIT_COMMIT_SHA, …) — handled in client.ts.
+ *   3. Local git at init (NODE ONLY)        — this module, `detectGitRelease`.
+ *   4. SDK version constant                 — never-empty fallback (client.ts).
+ *
+ * CRITICAL — environment safety: steps 3 must NEVER run or throw in a browser,
+ * React Native, edge, or any non-Node runtime (there is no `child_process`
+ * there). We detect Node via `typeof process`, `process.versions?.node`, and a
+ * *guarded dynamic* require of `child_process`. The require is intentionally
+ * NOT a static `import` so browser/RN bundlers do not try to resolve it.
+ */
+/** A function that runs a git command and returns its trimmed stdout (or '' / throws on failure). */
+type GitRunner = (args: string[]) => string;
+/**
+ * Parse raw git output into a release string. PURE — no I/O, no spawning. This
+ * is the seam tests target so they never need a real repo or to spawn git.
+ *
+ * @param describeOut Output of `git describe --tags --always --dirty` (preferred).
+ * @param revParseOut Output of `git rev-parse --short HEAD` (fallback).
+ * @param porcelainOut Output of `git status --porcelain` (used to add `-dirty`
+ *                     to the rev-parse fallback when the working tree is dirty).
+ * @returns A trimmed release string, or `undefined` when nothing usable was found.
+ */
+declare function parseGitRelease(describeOut: string | undefined, revParseOut?: string | undefined, porcelainOut?: string | undefined): string | undefined;
+/**
+ * Is the current runtime a Node-like environment that *could* spawn git?
+ * Returns false in browsers, React Native, Deno-without-node-compat, edge, etc.
+ */
+declare function isNodeRuntime(): boolean;
+/**
+ * Detect a release string from the local git repo at init time. NODE ONLY and
+ * fully guarded: in a browser / React Native / edge runtime, or when git / the
+ * `.git` dir / `child_process` is unavailable, this returns `undefined`
+ * silently. Runs at most once per process; the result is cached.
+ *
+ * @param runner Optional injected git runner (test seam). When omitted, a
+ *               guarded Node runner is created — and is `null` off-Node.
+ */
+declare function detectGitRelease(runner?: GitRunner | null): string | undefined;
+
+/**
  * Per-call scoped context isolation.
  *
  * A `Scope` carries the same shape as the top-level config (user, tags,
@@ -348,7 +397,10 @@ declare class Scope {
  * Release-tracking metadata. All fields are optional — the SDK auto-detects
  * sensible defaults from the runtime environment when possible:
  *
- * - `release`     ← `process.env.ALLSTAK_RELEASE`, then `npm_package_version`
+ * - `release`     ← `process.env.ALLSTAK_RELEASE`, then `npm_package_version`,
+ *                   then (NODE ONLY, opt-out via `autoDetectRelease: false`)
+ *                   the local git repo (`git describe`/`rev-parse`), then the
+ *                   {@link SDK_VERSION} constant so it is never empty
  * - `commitSha`   ← `process.env.ALLSTAK_COMMIT_SHA`, `GIT_COMMIT`, `VERCEL_GIT_COMMIT_SHA`,
  *                   `RAILWAY_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`
  * - `branch`      ← `process.env.ALLSTAK_BRANCH`, `GIT_BRANCH`, `VERCEL_GIT_COMMIT_REF`
@@ -409,6 +461,15 @@ interface AllStakConfig extends ReleaseMetadata {
     host?: string;
     environment?: string;
     release?: string;
+    /**
+     * Auto-detect `release` (and the never-empty version fallback) when it is not
+     * set explicitly or via env vars. Default: `true`. On Node this additionally
+     * probes the local git repo at init (`git describe`/`rev-parse`); in
+     * browsers/React Native the git step is a no-op and detection falls through
+     * to the SDK-version fallback. Set `false` to disable the git probe AND the
+     * version fallback (release may then be left empty).
+     */
+    autoDetectRelease?: boolean;
     user?: {
         id?: string;
         email?: string;
@@ -522,6 +583,20 @@ interface AllStakConfig extends ReleaseMetadata {
      */
     dsn?: string;
 }
+/**
+ * Apply release-metadata auto-detection to a config object, mutating it in
+ * place. Explicit user values always win. Auto-detected values come from
+ * conventional CI/runtime env vars (Vercel, Railway, Render, plain GIT_*),
+ * then — when `autoDetectRelease !== false` — the local git repo (Node only)
+ * and finally the SDK version constant so `release` is never empty.
+ *
+ * @param config The config to mutate.
+ * @param gitRunner Test seam: an injected git runner. When omitted, a guarded
+ *                  Node-only runner is used (and is a no-op off-Node). Pass
+ *                  `null` to force-skip the git probe.
+ */
+declare function applyReleaseAutodetect(config: AllStakConfig, gitRunner?: GitRunner | null): void;
+
 declare class AllStakClient {
     private transport;
     private config;
@@ -860,4 +935,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, applyReleaseAutodetect, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, parseGitRelease };

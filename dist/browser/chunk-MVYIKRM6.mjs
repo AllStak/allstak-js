@@ -2282,6 +2282,81 @@ function getDefaultIntegrations() {
   ];
 }
 
+// src/release-detect.ts
+function parseGitRelease(describeOut, revParseOut, porcelainOut) {
+  const describe = normalizeLine(describeOut);
+  if (describe) return describe;
+  const sha = normalizeLine(revParseOut);
+  if (!sha) return void 0;
+  const dirty = typeof porcelainOut === "string" && porcelainOut.trim().length > 0;
+  return dirty ? `${sha}-dirty` : sha;
+}
+function normalizeLine(out) {
+  if (!out) return void 0;
+  const first = out.split("\n")[0]?.trim();
+  return first && first.length > 0 ? first : void 0;
+}
+function isNodeRuntime() {
+  try {
+    return typeof process !== "undefined" && !!process.versions && typeof process.versions.node === "string" && // No `window`/`document` → not a DOM/browser host.
+    typeof globalThis.window === "undefined" && // React Native sets navigator.product === 'ReactNative'.
+    !(typeof navigator !== "undefined" && navigator.product === "ReactNative");
+  } catch {
+    return false;
+  }
+}
+function createNodeGitRunner(timeoutMs = 1500) {
+  if (!isNodeRuntime()) return null;
+  let cp;
+  try {
+    const req = typeof __require === "function" ? __require : (
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      typeof module !== "undefined" && module.require || void 0
+    );
+    if (!req) return null;
+    cp = req("child_process");
+  } catch {
+    return null;
+  }
+  if (!cp || typeof cp.execFileSync !== "function") return null;
+  return (args) => {
+    try {
+      const out = cp.execFileSync("git", args, {
+        timeout: timeoutMs,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+        windowsHide: true
+      });
+      return typeof out === "string" ? out : "";
+    } catch {
+      return "";
+    }
+  };
+}
+var cachedRelease = null;
+function detectGitRelease(runner) {
+  if (cachedRelease !== null) return cachedRelease ?? void 0;
+  const run = runner === void 0 ? createNodeGitRunner() : runner;
+  if (!run) {
+    cachedRelease = void 0;
+    return void 0;
+  }
+  try {
+    const describe = run(["describe", "--tags", "--always", "--dirty"]);
+    let release = parseGitRelease(describe);
+    if (!release) {
+      const sha = run(["rev-parse", "--short", "HEAD"]);
+      const porcelain = run(["status", "--porcelain"]);
+      release = parseGitRelease(void 0, sha, porcelain);
+    }
+    cachedRelease = release;
+    return release;
+  } catch {
+    cachedRelease = void 0;
+    return void 0;
+  }
+}
+
 // src/scope.ts
 var Scope = class {
   constructor() {
@@ -2362,13 +2437,20 @@ function envVar(name) {
   }
   return void 0;
 }
-function applyReleaseAutodetect(config) {
+function applyReleaseAutodetect(config, gitRunner) {
   const isBrowser = typeof window !== "undefined";
   if (!config.platform) config.platform = isBrowser ? "browser" : "node";
   if (!config.sdkName) config.sdkName = SDK_NAME;
   if (!config.sdkVersion) config.sdkVersion = SDK_VERSION;
+  const autoDetect = config.autoDetectRelease !== false;
   if (!config.release) {
     config.release = envVar("ALLSTAK_RELEASE") ?? envVar("npm_package_version") ?? envVar("VERCEL_GIT_COMMIT_SHA")?.slice(0, 12) ?? envVar("RAILWAY_GIT_COMMIT_SHA")?.slice(0, 12) ?? envVar("RENDER_GIT_COMMIT")?.slice(0, 12);
+  }
+  if (!config.release && autoDetect) {
+    config.release = detectGitRelease(gitRunner);
+  }
+  if (!config.release && autoDetect) {
+    config.release = config.sdkVersion ?? SDK_VERSION;
   }
   if (!config.commitSha) {
     config.commitSha = envVar("ALLSTAK_COMMIT_SHA") ?? envVar("GIT_COMMIT") ?? envVar("VERCEL_GIT_COMMIT_SHA") ?? envVar("RAILWAY_GIT_COMMIT_SHA") ?? envVar("RENDER_GIT_COMMIT");
@@ -3155,9 +3237,13 @@ export {
   eventFiltersIntegration,
   inboundFiltersIntegration,
   httpClientIntegration,
+  parseGitRelease,
+  isNodeRuntime,
+  detectGitRelease,
   Scope,
   SDK_VERSION,
+  applyReleaseAutodetect,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-5O2ITWBA.mjs.map
+//# sourceMappingURL=chunk-MVYIKRM6.mjs.map

@@ -3,28 +3,36 @@ import {
   DatabaseModule,
   Scope,
   Span,
+  applyReleaseAutodetect,
   consoleIntegration,
   databaseIntegration,
   dedupeIntegration,
   defineIntegration,
+  detectGitRelease,
   eventFiltersIntegration,
   httpClientIntegration,
   inboundFiltersIntegration,
+  isNodeRuntime,
+  parseGitRelease,
   src_default
-} from "./chunk-5O2ITWBA.mjs";
+} from "./chunk-MVYIKRM6.mjs";
 import "./chunk-KENGFPTD.mjs";
 export {
   AllStak,
   DatabaseModule,
   Scope,
   Span,
+  applyReleaseAutodetect,
   consoleIntegration,
   databaseIntegration,
   dedupeIntegration,
   src_default as default,
   defineIntegration,
+  detectGitRelease,
   eventFiltersIntegration,
   httpClientIntegration,
-  inboundFiltersIntegration
+  inboundFiltersIntegration,
+  isNodeRuntime,
+  parseGitRelease
 };
 //# sourceMappingURL=index.mjs.map

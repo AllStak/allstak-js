@@ -5,15 +5,19 @@ import {
   DatabaseModule,
   Scope,
   Span,
+  applyReleaseAutodetect,
   consoleIntegration,
   databaseIntegration,
   dedupeIntegration,
   defineIntegration,
+  detectGitRelease,
   eventFiltersIntegration,
   httpClientIntegration,
   inboundFiltersIntegration,
+  isNodeRuntime,
+  parseGitRelease,
   src_default
-} from "./chunk-LCAHX5SR.mjs";
+} from "./chunk-FUPWS3LN.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 export {
@@ -21,13 +25,17 @@ export {
   DatabaseModule,
   Scope,
   Span,
+  applyReleaseAutodetect,
   consoleIntegration,
   databaseIntegration,
   dedupeIntegration,
   src_default as default,
   defineIntegration,
+  detectGitRelease,
   eventFiltersIntegration,
   httpClientIntegration,
-  inboundFiltersIntegration
+  inboundFiltersIntegration,
+  isNodeRuntime,
+  parseGitRelease
 };
 //# sourceMappingURL=index.mjs.map

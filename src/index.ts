@@ -11,6 +11,9 @@ import type { DatabaseModule } from './modules/database';
 import type { AllStakIntegration } from './integration';
 
 export type { AllStakConfig, ScreenshotArtifact, ScreenshotCaptureOptions } from './client';
+export { applyReleaseAutodetect } from './client';
+export { parseGitRelease, detectGitRelease, isNodeRuntime } from './release-detect';
+export type { GitRunner } from './release-detect';
 export type { AllStakIntegration, IntegrationIndex, IntegrationOption } from './integration';
 export { defineIntegration } from './integration';
 export { eventFiltersIntegration, inboundFiltersIntegration } from './integrations/event-filters';

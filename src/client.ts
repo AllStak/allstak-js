@@ -17,6 +17,7 @@ import {
   setupIntegrations,
 } from './integration';
 import { getDefaultIntegrations } from './integrations/defaults';
+import { detectGitRelease, GitRunner } from './release-detect';
 
 /**
  * Single, static AllStak ingest host. Not customer-configurable in normal use:
@@ -35,7 +36,10 @@ export const SDK_NAME = 'allstak-js';
  * Release-tracking metadata. All fields are optional — the SDK auto-detects
  * sensible defaults from the runtime environment when possible:
  *
- * - `release`     ← `process.env.ALLSTAK_RELEASE`, then `npm_package_version`
+ * - `release`     ← `process.env.ALLSTAK_RELEASE`, then `npm_package_version`,
+ *                   then (NODE ONLY, opt-out via `autoDetectRelease: false`)
+ *                   the local git repo (`git describe`/`rev-parse`), then the
+ *                   {@link SDK_VERSION} constant so it is never empty
  * - `commitSha`   ← `process.env.ALLSTAK_COMMIT_SHA`, `GIT_COMMIT`, `VERCEL_GIT_COMMIT_SHA`,
  *                   `RAILWAY_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`
  * - `branch`      ← `process.env.ALLSTAK_BRANCH`, `GIT_BRANCH`, `VERCEL_GIT_COMMIT_REF`
@@ -96,6 +100,15 @@ export interface AllStakConfig extends ReleaseMetadata {
   host?: string;
   environment?: string;
   release?: string;
+  /**
+   * Auto-detect `release` (and the never-empty version fallback) when it is not
+   * set explicitly or via env vars. Default: `true`. On Node this additionally
+   * probes the local git repo at init (`git describe`/`rev-parse`); in
+   * browsers/React Native the git step is a no-op and detection falls through
+   * to the SDK-version fallback. Set `false` to disable the git probe AND the
+   * version fallback (release may then be left empty).
+   */
+  autoDetectRelease?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -232,21 +245,41 @@ function envVar(name: string): string | undefined {
 /**
  * Apply release-metadata auto-detection to a config object, mutating it in
  * place. Explicit user values always win. Auto-detected values come from
- * conventional CI/runtime env vars (Vercel, Railway, Render, plain GIT_*).
+ * conventional CI/runtime env vars (Vercel, Railway, Render, plain GIT_*),
+ * then — when `autoDetectRelease !== false` — the local git repo (Node only)
+ * and finally the SDK version constant so `release` is never empty.
+ *
+ * @param config The config to mutate.
+ * @param gitRunner Test seam: an injected git runner. When omitted, a guarded
+ *                  Node-only runner is used (and is a no-op off-Node). Pass
+ *                  `null` to force-skip the git probe.
  */
-export function applyReleaseAutodetect(config: AllStakConfig): void {
+export function applyReleaseAutodetect(config: AllStakConfig, gitRunner?: GitRunner | null): void {
   const isBrowser = typeof window !== 'undefined';
   if (!config.platform) config.platform = isBrowser ? 'browser' : 'node';
   if (!config.sdkName) config.sdkName = SDK_NAME;
   if (!config.sdkVersion) config.sdkVersion = SDK_VERSION;
 
+  const autoDetect = config.autoDetectRelease !== false;
+
   if (!config.release) {
+    // Steps 1 (explicit) handled by the `if (!config.release)` guard.
+    // Step 2: conventional CI/runtime env vars.
     config.release =
       envVar('ALLSTAK_RELEASE') ??
       envVar('npm_package_version') ??
       envVar('VERCEL_GIT_COMMIT_SHA')?.slice(0, 12) ??
       envVar('RAILWAY_GIT_COMMIT_SHA')?.slice(0, 12) ??
       envVar('RENDER_GIT_COMMIT')?.slice(0, 12);
+  }
+  if (!config.release && autoDetect) {
+    // Step 3: local git probe — NODE ONLY, fully guarded, runs once + cached.
+    // In browsers/RN/edge `detectGitRelease` is a clean no-op (returns undefined).
+    config.release = detectGitRelease(gitRunner);
+  }
+  if (!config.release && autoDetect) {
+    // Step 4: never-empty fallback to the SDK version.
+    config.release = config.sdkVersion ?? SDK_VERSION;
   }
   if (!config.commitSha) {
     config.commitSha =
