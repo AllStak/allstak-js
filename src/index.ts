@@ -20,6 +20,8 @@ export {
   _resetRuntimeReleaseRegistrationForTest,
   type RegisterRuntimeReleaseOptions,
 } from './release-registration';
+export { Session, SessionTracker } from './session';
+export type { SessionStatus } from './session';
 export type { AllStakIntegration, IntegrationIndex, IntegrationOption } from './integration';
 export { defineIntegration } from './integration';
 export { eventFiltersIntegration, inboundFiltersIntegration } from './integrations/event-filters';

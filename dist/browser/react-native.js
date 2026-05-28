@@ -563,11 +563,24 @@ var ErrorModule = class {
     this.onUnhandledRejectionHandler = null;
     this.breadcrumbs = [];
     this.eventProcessors = [];
+    /**
+     * Optional hook invoked when the browser autocapture observes an UNHANDLED
+     * error/rejection. The client wires this to mark the release-health session
+     * as crashed. Best-effort: a throwing hook never blocks capture.
+     */
+    this.onUnhandled = null;
     this.maxBreadcrumbs = config.maxBreadcrumbs ?? DEFAULT_MAX_BREADCRUMBS;
     this.setupAutocapture();
   }
   addEventProcessor(processor) {
     this.eventProcessors.push(processor);
+  }
+  /**
+   * Register a callback fired when browser autocapture sees an unhandled
+   * error/rejection (used by the client to mark the session crashed).
+   */
+  setOnUnhandled(callback) {
+    this.onUnhandled = callback;
   }
   addBreadcrumb(type, message, level, data) {
     const crumb = {
@@ -740,10 +753,12 @@ var ErrorModule = class {
     this.onErrorHandler = ((event) => {
       const errorEvent = event;
       const err = errorEvent.error instanceof Error ? errorEvent.error : new Error(errorEvent.message || "Unknown error");
+      this.notifyUnhandled();
       this.captureException(err);
     });
     this.onUnhandledRejectionHandler = (event) => {
       const err = event.reason instanceof Error ? event.reason : new Error(String(event.reason));
+      this.notifyUnhandled();
       this.captureException(err);
     };
     window.addEventListener("error", this.onErrorHandler);
@@ -751,6 +766,12 @@ var ErrorModule = class {
       "unhandledrejection",
       this.onUnhandledRejectionHandler
     );
+  }
+  notifyUnhandled() {
+    try {
+      this.onUnhandled?.();
+    } catch {
+    }
   }
   destroy() {
     if (typeof window === "undefined") return;
@@ -2101,6 +2122,178 @@ function isTestRuntime() {
   }
 }
 
+// src/session.ts
+var PATH_START = "/ingest/v1/sessions/start";
+var PATH_END = "/ingest/v1/sessions/end";
+var Session = class {
+  constructor(id = generateId(), startedAt = Date.now()) {
+    this._status = "ok";
+    this._errorCount = 0;
+    this.id = id;
+    this.startedAt = startedAt;
+  }
+  get status() {
+    return this._status;
+  }
+  get errorCount() {
+    return this._errorCount;
+  }
+  /** Increment the error counter and bump OK→ERRORED (terminal status wins). */
+  recordError() {
+    this._errorCount++;
+    if (this._status === "ok") this._status = "errored";
+  }
+  /** Mark a terminal crashed status (overrides ERRORED). Used by the uncaught handler. */
+  recordCrash() {
+    this._status = "crashed";
+    this._errorCount++;
+  }
+  /** Promote to ABNORMAL only if still OK or ERRORED (never downgrade CRASHED). */
+  recordAbnormalExit() {
+    if (this._status === "ok" || this._status === "errored") this._status = "abnormal";
+  }
+  /** Duration from start to now, floored at 0. */
+  durationMs() {
+    return Math.max(0, Date.now() - this.startedAt);
+  }
+};
+function isTestRuntime2() {
+  try {
+    if (typeof process !== "undefined" && process.env) {
+      return process.env.VITEST === "true";
+    }
+  } catch {
+  }
+  return false;
+}
+var SessionTracker = class {
+  constructor(config, transport, sessionId) {
+    this.config = config;
+    this.transport = transport;
+    this.sessionId = sessionId;
+    this.active = null;
+    this.ended = false;
+    this.cleanup = [];
+  }
+  /**
+   * Idempotent. Reuses the client's existing session id, sends `/sessions/start`,
+   * and installs the graceful-shutdown end hooks. Returns the active session.
+   * Fail-open: never throws.
+   */
+  start() {
+    if (this.active) return this.active;
+    const session = new Session(this.sessionId);
+    this.active = session;
+    try {
+      const release = this.resolveRelease();
+      if (release) {
+        const payload = {
+          sessionId: session.id,
+          release,
+          environment: this.config.environment,
+          userId: this.config.user?.id,
+          sdkName: this.config.sdkName,
+          sdkVersion: this.config.sdkVersion,
+          platform: this.config.platform
+        };
+        this.transport.send(PATH_START, payload);
+      }
+      this.installShutdownHooks();
+    } catch {
+    }
+    return session;
+  }
+  /** The active session, or null if not started / already ended. */
+  current() {
+    return this.ended ? null : this.active;
+  }
+  /** Record a HANDLED error against the active session. No I/O. */
+  recordError() {
+    this.current()?.recordError();
+  }
+  /** Record an UNHANDLED/fatal crash. No I/O — the end POST carries the status. */
+  recordCrash() {
+    this.current()?.recordCrash();
+  }
+  /**
+   * Terminate the session and POST `/sessions/end`. Idempotent and best-effort.
+   * When `finalStatus` is omitted the session's accumulated status is used.
+   * Fail-open: never throws.
+   */
+  end(finalStatus) {
+    if (this.ended) return;
+    const session = this.active;
+    this.active = null;
+    if (!session) {
+      this.ended = true;
+      return;
+    }
+    this.ended = true;
+    this.removeShutdownHooks();
+    try {
+      const status = finalStatus ?? session.status;
+      const release = this.resolveRelease();
+      if (!release) return;
+      const payload = {
+        sessionId: session.id,
+        durationMs: Math.min(Number.MAX_SAFE_INTEGER, session.durationMs()),
+        status
+      };
+      this.transport.send(PATH_END, payload);
+    } catch {
+    }
+  }
+  /**
+   * The session's `release` falls back to `sdkVersion` (then nothing) so a
+   * session is still attributable even when no release is configured.
+   */
+  resolveRelease() {
+    const release = this.config.release?.trim();
+    if (release) return release;
+    const sdkVersion = this.config.sdkVersion?.trim();
+    return sdkVersion || void 0;
+  }
+  // ── Graceful-shutdown hooks ───────────────────────────────────────────────
+  installShutdownHooks() {
+    const endOnce = () => this.end();
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      const onPageHide = () => endOnce();
+      const onVisibility = () => {
+        if (typeof document !== "undefined" && document.visibilityState === "hidden") endOnce();
+      };
+      window.addEventListener("pagehide", onPageHide);
+      this.cleanup.push(() => window.removeEventListener("pagehide", onPageHide));
+      if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+        document.addEventListener("visibilitychange", onVisibility);
+        this.cleanup.push(() => document.removeEventListener("visibilitychange", onVisibility));
+      }
+      return;
+    }
+    if (typeof process !== "undefined" && typeof process.on === "function") {
+      const onExit = () => endOnce();
+      process.on("beforeExit", onExit);
+      process.on("exit", onExit);
+      process.on("SIGTERM", onExit);
+      this.cleanup.push(() => {
+        if (typeof process.off === "function") {
+          process.off("beforeExit", onExit);
+          process.off("exit", onExit);
+          process.off("SIGTERM", onExit);
+        }
+      });
+    }
+  }
+  removeShutdownHooks() {
+    for (const fn of this.cleanup) {
+      try {
+        fn();
+      } catch {
+      }
+    }
+    this.cleanup = [];
+  }
+};
+
 // src/integration.ts
 var installedOnce = /* @__PURE__ */ new Set();
 function defineIntegration(factory) {
@@ -2984,6 +3177,7 @@ var AllStakClient = class {
   constructor(config) {
     this.integrations = {};
     this.sessionReplay = null;
+    this.sessionTracker = null;
     this.globalScopeStack = [];
     this.asyncScopeStorage = createAsyncScopeStorage();
     // ─── Node uncaughtException / unhandledRejection auto-capture ─────
@@ -3050,6 +3244,11 @@ var AllStakClient = class {
         this.sessionId
       );
     }
+    if (config.enableAutoSessionTracking !== false && !isTestRuntime2()) {
+      this.sessionTracker = new SessionTracker(this.config, this.transport, this.sessionId);
+      this.errors.setOnUnhandled(() => this.sessionTracker?.recordCrash());
+      this.sessionTracker.start();
+    }
   }
   isNodeBuild() {
     return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
@@ -3061,6 +3260,7 @@ var AllStakClient = class {
     return this.baseUrl;
   }
   captureException(error, context) {
+    this.sessionTracker?.recordError();
     const traceContext = {};
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
@@ -3446,6 +3646,7 @@ var AllStakClient = class {
     this.tracing.resetTrace();
   }
   destroy() {
+    this.sessionTracker?.end();
     setTraceResolver(null);
     this.tracing.destroy();
     this.errors.destroy();
@@ -3502,6 +3703,7 @@ var AllStakClient = class {
     this.nodeUncaughtHandler = (err) => {
       const e = err instanceof Error ? err : new Error(String(err));
       try {
+        this.sessionTracker?.recordCrash();
         this.errors.captureException(e, { source: "uncaughtException" });
       } catch {
       }
@@ -3511,6 +3713,7 @@ var AllStakClient = class {
     this.nodeRejectionHandler = (reason) => {
       const e = reason instanceof Error ? reason : new Error(String(reason));
       try {
+        this.sessionTracker?.recordCrash();
         this.errors.captureException(e, { source: "unhandledRejection" });
       } catch {
       }

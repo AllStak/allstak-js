@@ -2,6 +2,8 @@ import {
   AllStak,
   DatabaseModule,
   Scope,
+  Session,
+  SessionTracker,
   Span,
   _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
@@ -18,12 +20,14 @@ import {
   parseGitRelease,
   registerRuntimeRelease,
   src_default
-} from "./chunk-ULJA5QL6.mjs";
+} from "./chunk-NRDJOATR.mjs";
 import "./chunk-KENGFPTD.mjs";
 export {
   AllStak,
   DatabaseModule,
   Scope,
+  Session,
+  SessionTracker,
   Span,
   _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,

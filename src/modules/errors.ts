@@ -245,6 +245,12 @@ export class ErrorModule {
   private breadcrumbs: Breadcrumb[] = [];
   private maxBreadcrumbs: number;
   private eventProcessors: ErrorEventProcessor[] = [];
+  /**
+   * Optional hook invoked when the browser autocapture observes an UNHANDLED
+   * error/rejection. The client wires this to mark the release-health session
+   * as crashed. Best-effort: a throwing hook never blocks capture.
+   */
+  private onUnhandled: (() => void) | null = null;
 
   constructor(
     private transport: HttpTransport,
@@ -257,6 +263,14 @@ export class ErrorModule {
 
   addEventProcessor(processor: ErrorEventProcessor): void {
     this.eventProcessors.push(processor);
+  }
+
+  /**
+   * Register a callback fired when browser autocapture sees an unhandled
+   * error/rejection (used by the client to mark the session crashed).
+   */
+  setOnUnhandled(callback: (() => void) | null): void {
+    this.onUnhandled = callback;
   }
 
   addBreadcrumb(
@@ -498,6 +512,7 @@ export class ErrorModule {
         errorEvent.error instanceof Error
           ? errorEvent.error
           : new Error(errorEvent.message || 'Unknown error');
+      this.notifyUnhandled();
       this.captureException(err);
     }) as (event: ErrorEvent) => void;
 
@@ -506,6 +521,7 @@ export class ErrorModule {
         event.reason instanceof Error
           ? event.reason
           : new Error(String(event.reason));
+      this.notifyUnhandled();
       this.captureException(err);
     };
 
@@ -514,6 +530,14 @@ export class ErrorModule {
       'unhandledrejection',
       this.onUnhandledRejectionHandler as unknown as EventListener,
     );
+  }
+
+  private notifyUnhandled(): void {
+    try {
+      this.onUnhandled?.();
+    } catch {
+      /* never block capture on a broken session hook */
+    }
   }
 
   destroy(): void {

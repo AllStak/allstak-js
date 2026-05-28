@@ -476,6 +476,14 @@ interface AllStakConfig extends ReleaseMetadata {
      * skipped to avoid one release-registration request per visitor.
      */
     autoRegisterRelease?: boolean;
+    /**
+     * Track release-health sessions ("one session per process / app-launch").
+     * On init the SDK POSTs `/sessions/start`; on graceful shutdown it POSTs
+     * `/sessions/end` with the final status (`ok`/`errored`/`crashed`). Sessions
+     * are never sampled and tracking is fully fail-open. Default true. Set false
+     * to opt out. Automatically skipped under a unit-test runtime.
+     */
+    enableAutoSessionTracking?: boolean;
     user?: {
         id?: string;
         email?: string;
@@ -616,6 +624,7 @@ declare class AllStakClient {
     private integrations;
     private sessionReplay;
     private sessionId;
+    private sessionTracker;
     private globalScopeStack;
     private asyncScopeStorage;
     constructor(config: AllStakConfig);
@@ -799,6 +808,92 @@ declare function registerRuntimeRelease(options: RegisterRuntimeReleaseOptions):
 /** @internal */
 declare function _resetRuntimeReleaseRegistrationForTest(): void;
 
+/**
+ * Lifecycle status of a release-health session. Vocabulary matches the AllStak
+ * backend's `/ingest/v1/sessions/end` contract and Sentry's release-health
+ * conventions, and mirrors the Java SDK's {@code SessionStatus}:
+ *
+ * - `ok`       — session ended normally with at most non-fatal logs.
+ * - `errored`  — at least one HANDLED error landed during the session, but the
+ *                process kept running.
+ * - `crashed`  — an UNHANDLED/fatal exception ended the process (the SDK only
+ *                reports this when it observes the uncaught error itself).
+ * - `abnormal` — process ended without a normal flush. Reserved for callers
+ *                that pass an explicit final status to {@link SessionTracker.end}.
+ */
+type SessionStatus = 'ok' | 'errored' | 'crashed' | 'abnormal';
+/**
+ * A single release-health session — one per process / app-launch in the default
+ * "single session" mode. Mirrors the Java SDK's {@code Session} status model:
+ * `recordError` escalates OK→ERRORED, `recordCrash` is terminal (CRASHED), and
+ * `recordAbnormalExit` promotes OK/ERRORED→ABNORMAL.
+ */
+declare class Session {
+    readonly id: string;
+    readonly startedAt: number;
+    private _status;
+    private _errorCount;
+    constructor(id?: string, startedAt?: number);
+    get status(): SessionStatus;
+    get errorCount(): number;
+    /** Increment the error counter and bump OK→ERRORED (terminal status wins). */
+    recordError(): void;
+    /** Mark a terminal crashed status (overrides ERRORED). Used by the uncaught handler. */
+    recordCrash(): void;
+    /** Promote to ABNORMAL only if still OK or ERRORED (never downgrade CRASHED). */
+    recordAbnormalExit(): void;
+    /** Duration from start to now, floored at 0. */
+    durationMs(): number;
+}
+/**
+ * "One session per process / app-launch" tracker.
+ *
+ * On {@link start} the SDK reuses the client's existing session id, records a
+ * start timestamp, sets in-memory status to `ok`, and POSTs `/sessions/start`.
+ * Errored/crashed transitions are recorded in-memory only; the terminal
+ * {@link end} call carries the final status + duration to `/sessions/end`.
+ *
+ * Sessions are NEVER sampled. Every network call is best-effort and fail-open —
+ * a failure must never throw or block init/shutdown.
+ *
+ * Re-entrancy safe: a second {@link start} is a no-op; once ended the tracker
+ * does not re-arm.
+ */
+declare class SessionTracker {
+    private config;
+    private transport;
+    private sessionId;
+    private active;
+    private ended;
+    private cleanup;
+    constructor(config: AllStakConfig, transport: HttpTransport, sessionId: string);
+    /**
+     * Idempotent. Reuses the client's existing session id, sends `/sessions/start`,
+     * and installs the graceful-shutdown end hooks. Returns the active session.
+     * Fail-open: never throws.
+     */
+    start(): Session;
+    /** The active session, or null if not started / already ended. */
+    current(): Session | null;
+    /** Record a HANDLED error against the active session. No I/O. */
+    recordError(): void;
+    /** Record an UNHANDLED/fatal crash. No I/O — the end POST carries the status. */
+    recordCrash(): void;
+    /**
+     * Terminate the session and POST `/sessions/end`. Idempotent and best-effort.
+     * When `finalStatus` is omitted the session's accumulated status is used.
+     * Fail-open: never throws.
+     */
+    end(finalStatus?: SessionStatus): void;
+    /**
+     * The session's `release` falls back to `sdkVersion` (then nothing) so a
+     * session is still attributable even when no release is configured.
+     */
+    private resolveRelease;
+    private installShutdownHooks;
+    private removeShutdownHooks;
+}
+
 declare const eventFiltersIntegration: () => {
     name: string;
     processEvent(event: ErrorIngestPayload, client: AllStakClient): ErrorIngestPayload | null;
@@ -957,4 +1052,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, parseGitRelease, registerRuntimeRelease };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Session, type SessionStatus, SessionTracker, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, parseGitRelease, registerRuntimeRelease };

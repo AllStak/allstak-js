@@ -10,6 +10,7 @@ import { setTraceResolver } from './integrations/db/shared';
 import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
 import { generateId } from './utils/uuid';
 import { registerRuntimeRelease } from './release-registration';
+import { SessionTracker, isTestRuntime as isSessionTestRuntime } from './session';
 import {
   AllStakIntegration,
   IntegrationIndex,
@@ -116,6 +117,14 @@ export interface AllStakConfig extends ReleaseMetadata {
    * skipped to avoid one release-registration request per visitor.
    */
   autoRegisterRelease?: boolean;
+  /**
+   * Track release-health sessions ("one session per process / app-launch").
+   * On init the SDK POSTs `/sessions/start`; on graceful shutdown it POSTs
+   * `/sessions/end` with the final status (`ok`/`errored`/`crashed`). Sessions
+   * are never sampled and tracking is fully fail-open. Default true. Set false
+   * to opt out. Automatically skipped under a unit-test runtime.
+   */
+  enableAutoSessionTracking?: boolean;
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -349,6 +358,7 @@ export class AllStakClient {
   private integrations: IntegrationIndex = {};
   private sessionReplay: SessionReplayModule | null = null;
   private sessionId: string;
+  private sessionTracker: SessionTracker | null = null;
   private globalScopeStack: Scope[] = [];
   private asyncScopeStorage: AsyncScopeStorage | null = createAsyncScopeStorage();
 
@@ -429,6 +439,16 @@ export class AllStakClient {
         this.sessionId,
       );
     }
+
+    // Release-health: one session per process / app-launch. Opt out via
+    // enableAutoSessionTracking:false; automatically skipped under unit tests.
+    if (config.enableAutoSessionTracking !== false && !isSessionTestRuntime()) {
+      this.sessionTracker = new SessionTracker(this.config, this.transport, this.sessionId);
+      // Browser autocapture sees unhandled errors inside ErrorModule; route
+      // them to a crashed-session transition.
+      this.errors.setOnUnhandled(() => this.sessionTracker?.recordCrash());
+      this.sessionTracker.start();
+    }
   }
 
   private isNodeBuild(): boolean {
@@ -444,6 +464,10 @@ export class AllStakClient {
   }
 
   captureException(error: Error, context?: Record<string, unknown>): void {
+    // Release-health: a HANDLED captureException marks the session errored.
+    // Node's uncaught/unhandledRejection handlers route through
+    // installNodeErrorHandlers and mark the session crashed instead.
+    this.sessionTracker?.recordError();
     const traceContext: Record<string, unknown> = {};
     const traceId = this.tracing.getTraceId();
     if (traceId) traceContext.traceId = traceId;
@@ -898,6 +922,9 @@ export class AllStakClient {
   }
 
   destroy(): void {
+    // End the release-health session (graceful shutdown / dispose) before
+    // tearing down transport-backed modules. Best-effort + fail-open.
+    this.sessionTracker?.end();
     setTraceResolver(null);
     this.tracing.destroy();
     this.errors.destroy();
@@ -962,6 +989,8 @@ export class AllStakClient {
     this.nodeUncaughtHandler = (err: Error) => {
       const e = err instanceof Error ? err : new Error(String(err));
       try {
+        // Unhandled/fatal → crashed (terminal, overrides errored).
+        this.sessionTracker?.recordCrash();
         this.errors.captureException(e, { source: 'uncaughtException' });
       } catch {
         /* never break the host process */
@@ -972,6 +1001,8 @@ export class AllStakClient {
     this.nodeRejectionHandler = (reason: unknown) => {
       const e = reason instanceof Error ? reason : new Error(String(reason));
       try {
+        // Unhandled/fatal → crashed (terminal, overrides errored).
+        this.sessionTracker?.recordCrash();
         this.errors.captureException(e, { source: 'unhandledRejection' });
       } catch {
         /* never break the host process */

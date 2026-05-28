@@ -1,7 +1,7 @@
 import {
   AllStak,
   SDK_VERSION
-} from "./chunk-ULJA5QL6.mjs";
+} from "./chunk-NRDJOATR.mjs";
 import {
   __require
 } from "./chunk-KENGFPTD.mjs";
