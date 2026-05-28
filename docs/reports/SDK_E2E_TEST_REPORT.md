@@ -111,7 +111,7 @@ Run via `node test-app/sdk-test.mjs` against live Docker stack.
 ### Step 7: Alerts
 | Test | Status | Notes |
 |------|--------|-------|
-| `GET /api/v1/alerts` | ❌ 404 | **Backend endpoint not implemented** |
+| `GET /api/v1/alerts` | ❌ 404 | Endpoint unavailable in this test environment |
 
 ### Step 8: Auth Edge Cases
 | Test | Status |

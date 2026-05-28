@@ -169,6 +169,12 @@ The SDK redacts common sensitive fields such as authorization headers, cookies, 
 - App shutdown: call `await AllStak.flush()` before a short-lived process exits.
 - Browser requests blocked: allow `https://api.allstak.sa` in your content security policy.
 
+## Contributing and Support
+
+- Report bugs with the GitHub bug report template: https://github.com/AllStak/allstak-js/issues/new/choose
+- Open pull requests using the checklist in [CONTRIBUTING.md](CONTRIBUTING.md).
+- Report security vulnerabilities privately through [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT

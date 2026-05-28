@@ -224,7 +224,7 @@ The React app typed `mysecretpassword123` into a password field. The activity lo
 
 ## Known Gaps
 
-### Heartbeat Persistence Not Implemented
+### Heartbeat Persistence
 
 The `/ingest/v1/heartbeat` endpoint accepts requests and returns `202`, but no storage layer exists for the heartbeat data. Neither ClickHouse nor Postgres have a heartbeat/ping table. The `cron_monitors` table has no `last_ping_at` or status columns. As a result, the Cron Monitors dashboard page always shows `status: pending` and `LAST PING: —` regardless of how many heartbeats have been sent.
 
