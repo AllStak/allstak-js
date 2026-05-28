@@ -1,4 +1,5 @@
 import { HttpTransport, TransportStats } from './transport/http';
+import { createOfflineQueue, OfflineQueue, isPersistablePath } from './transport/offline-queue';
 import { ErrorModule, ErrorEventProcessor, EventFilterPattern } from './modules/errors';
 import { LogModule, LogLevel } from './modules/logs';
 import { SessionReplayModule } from './modules/session-replay';
@@ -125,6 +126,41 @@ export interface AllStakConfig extends ReleaseMetadata {
    * to opt out. Automatically skipped under a unit-test runtime.
    */
   enableAutoSessionTracking?: boolean;
+  /**
+   * Persist un-sent telemetry across a process/app restart AND a network
+   * outage. When an event cannot be delivered (network error, retries
+   * exhausted, circuit open / offline, or the app is shutting down with events
+   * still buffered) the SDK writes the ALREADY-PII-SCRUBBED payload to a
+   * persistent store and replays it on the next init through the same
+   * transport (respecting retry/backoff/circuit-breaker). Entries are removed
+   * only after a 2xx accept or a permanent (non-429 4xx) drop.
+   *
+   * Mechanism is chosen per runtime: browser → capped `localStorage`
+   * (+ `navigator.sendBeacon` flush on tab close); Node → a filesystem spool in
+   * `<tmpdir>/allstak-offline-queue` (configurable via {@link offlineQueue}.dir);
+   * React Native / custom → a pluggable adapter registered with
+   * `setPersistence(...)` (or a detected global `AsyncStorage`); edge / sandbox
+   * runtimes degrade silently to in-memory. The store is bounded by count,
+   * bytes, and max-age (oldest dropped first) and is fully fail-open.
+   *
+   * Session lifecycle calls (`/sessions/start` + `/end`) are NEVER persisted —
+   * a replayed stale session would skew durations.
+   *
+   * Default: ON. Set `false` to disable persistence entirely (keeps the
+   * existing in-memory buffer behavior).
+   */
+  enableOfflineQueue?: boolean;
+  /** Offline-queue tuning. See {@link enableOfflineQueue}. */
+  offlineQueue?: {
+    /** Node only: spool directory. Default `<tmpdir>/allstak-offline-queue`. */
+    dir?: string;
+    /** Max stored events before the oldest is evicted. */
+    maxEvents?: number;
+    /** Max total stored bytes (approx) before the oldest is evicted. */
+    maxBytes?: number;
+    /** Max age (ms) of a stored event; older entries are dropped on load. */
+    maxAgeMs?: number;
+  };
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
   /** Per-event extra data attached to every capture (override per call via context arg). */
@@ -347,6 +383,9 @@ declare const require: undefined | ((id: string) => { AsyncLocalStorage?: new ()
 
 export class AllStakClient {
   private transport: HttpTransport;
+  private offlineQueue: OfflineQueue | null = null;
+  private apiKey = '';
+  private offlineFlushCleanup: Array<() => void> = [];
   private config: AllStakConfig;
   private errors: ErrorModule;
   private logs: LogModule;
@@ -368,7 +407,27 @@ export class AllStakClient {
     this.sessionId = generateId();
     const { baseUrl, apiKey } = resolveTransport(config);
     this.baseUrl = baseUrl;
-    this.transport = new HttpTransport(baseUrl, apiKey);
+    this.apiKey = apiKey;
+    // Persistent offline queue (survives restart + outage). Default ON; the
+    // factory selects the idiomatic backend per runtime and degrades silently
+    // to a no-op when no store is writable, so this never blocks init.
+    this.offlineQueue = createOfflineQueue({
+      enabled: config.enableOfflineQueue,
+      dir: config.offlineQueue?.dir,
+      maxEvents: config.offlineQueue?.maxEvents,
+      maxBytes: config.offlineQueue?.maxBytes,
+      maxAgeMs: config.offlineQueue?.maxAgeMs,
+    });
+    this.transport = new HttpTransport(baseUrl, apiKey, this.offlineQueue);
+    // Replay anything a previous process/session persisted. Async + fail-open.
+    if (config.enableOfflineQueue !== false) {
+      try {
+        this.transport.drainPersisted();
+      } catch {
+        /* fail-open: replay must never break init */
+      }
+      this.installOfflineFlushHooks();
+    }
     if (config.autoRegisterRelease !== false) {
       registerRuntimeRelease({
         host: baseUrl,
@@ -932,6 +991,18 @@ export class AllStakClient {
     this._database.destroy();
     this.sessionReplay?.destroy();
     this.uninstallNodeErrorHandlers();
+    this.uninstallOfflineFlushHooks();
+  }
+
+  private uninstallOfflineFlushHooks(): void {
+    for (const fn of this.offlineFlushCleanup) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.offlineFlushCleanup = [];
   }
 
   private shouldCaptureScreenshot(): boolean {
@@ -975,6 +1046,91 @@ export class AllStakClient {
       };
     } catch {
       return { ...context, 'screenshot.status': 'failed' };
+    }
+  }
+
+  // ─── Offline-queue shutdown flush ────────────────────────────────
+  /**
+   * On graceful shutdown spill any still-buffered telemetry into the
+   * persistent store so it survives a restart.
+   *
+   * In the browser we ALSO try a best-effort `navigator.sendBeacon` for each
+   * buffered event on `pagehide` / `visibilitychange('hidden')` so in-flight
+   * events have a chance to leave the tab before it closes; whatever the
+   * beacon can't take is persisted for the next page load. Session lifecycle
+   * paths are skipped (the SessionTracker owns its own end-of-session beacon).
+   * Fail-open throughout.
+   */
+  private installOfflineFlushHooks(): void {
+    // Browser / RN WebView: pagehide + hidden visibility.
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      const onHide = () => this.flushOfflineOnHide();
+      const onVisibility = () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          this.flushOfflineOnHide();
+        }
+      };
+      window.addEventListener('pagehide', onHide);
+      this.offlineFlushCleanup.push(() => window.removeEventListener('pagehide', onHide));
+      if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', onVisibility);
+        this.offlineFlushCleanup.push(() =>
+          document.removeEventListener('visibilitychange', onVisibility),
+        );
+      }
+      return;
+    }
+
+    // Node: spill buffered telemetry to the spool on graceful exit.
+    if (typeof process !== 'undefined' && typeof process.on === 'function') {
+      const onExit = () => {
+        try {
+          this.transport.persistBufferedNow();
+        } catch {
+          /* ignore */
+        }
+      };
+      process.on('beforeExit', onExit);
+      process.on('SIGTERM', onExit);
+      this.offlineFlushCleanup.push(() => {
+        if (typeof process.off === 'function') {
+          process.off('beforeExit', onExit);
+          process.off('SIGTERM', onExit);
+        }
+      });
+    }
+  }
+
+  private flushOfflineOnHide(): void {
+    try {
+      // Drain the in-memory buffer ONCE. Try a best-effort sendBeacon for each
+      // event (keeps small, already-scrubbed payloads flowing even as the tab
+      // unloads); anything the beacon can't take is persisted for the next page
+      // load. Session paths are never persisted (the SessionTracker owns its
+      // own end-of-session beacon).
+      const drained = this.transport.drainBufferForUnload();
+      const nav = typeof navigator !== 'undefined' ? navigator : undefined;
+      const canBeacon = !!nav && typeof nav.sendBeacon === 'function';
+
+      for (const item of drained) {
+        let beaconed = false;
+        if (canBeacon && isPersistablePath(item.path)) {
+          try {
+            const blob = new Blob([JSON.stringify(item.payload)], { type: 'application/json' });
+            // sendBeacon can't set custom headers; the ingest beacon path
+            // accepts the api key as a query param for unload-time flushes.
+            beaconed = nav!.sendBeacon(
+              `${this.baseUrl}${item.path}?k=${encodeURIComponent(this.apiKey)}`,
+              blob,
+            );
+          } catch {
+            beaconed = false;
+          }
+        }
+        if (!beaconed) this.transport.persistOne(item);
+      }
+    } catch {
+      /* fail-open */
     }
   }
 

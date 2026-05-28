@@ -11,6 +11,7 @@ import {
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
   consoleIntegration,
+  createOfflineQueue,
   databaseIntegration,
   dedupeIntegration,
   defineIntegration,
@@ -21,8 +22,9 @@ import {
   isNodeRuntime,
   parseGitRelease,
   registerRuntimeRelease,
+  setPersistence,
   src_default
-} from "./chunk-HYMEGEOH.mjs";
+} from "./chunk-HZP5SVKB.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 export {
@@ -36,6 +38,7 @@ export {
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
   consoleIntegration,
+  createOfflineQueue,
   databaseIntegration,
   dedupeIntegration,
   src_default as default,
@@ -46,6 +49,7 @@ export {
   inboundFiltersIntegration,
   isNodeRuntime,
   parseGitRelease,
-  registerRuntimeRelease
+  registerRuntimeRelease,
+  setPersistence
 };
 //# sourceMappingURL=index.mjs.map

@@ -22,6 +22,8 @@ export {
 } from './release-registration';
 export { Session, SessionTracker } from './session';
 export type { SessionStatus } from './session';
+export { setPersistence, createOfflineQueue } from './transport/offline-queue';
+export type { OfflineQueue, PersistenceAdapter, PersistedEvent, OfflineQueueOptions } from './transport/offline-queue';
 export type { AllStakIntegration, IntegrationIndex, IntegrationOption } from './integration';
 export { defineIntegration } from './integration';
 export { eventFiltersIntegration, inboundFiltersIntegration } from './integrations/event-filters';

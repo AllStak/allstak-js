@@ -1,4 +1,5 @@
-import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-DMxZg38h.mjs';
+import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-BconFy9O.mjs';
+export { O as OfflineQueue, b as OfflineQueueOptions, P as PersistedEvent, c as PersistenceAdapter, d as createOfflineQueue, s as setPersistence } from './database-BconFy9O.mjs';
 import { H as HttpBodyCaptureOptions, T as TracePropagationTarget } from './auto-breadcrumbs-DRB0ieVv.mjs';
 
 interface ErrorEvent {
@@ -484,6 +485,41 @@ interface AllStakConfig extends ReleaseMetadata {
      * to opt out. Automatically skipped under a unit-test runtime.
      */
     enableAutoSessionTracking?: boolean;
+    /**
+     * Persist un-sent telemetry across a process/app restart AND a network
+     * outage. When an event cannot be delivered (network error, retries
+     * exhausted, circuit open / offline, or the app is shutting down with events
+     * still buffered) the SDK writes the ALREADY-PII-SCRUBBED payload to a
+     * persistent store and replays it on the next init through the same
+     * transport (respecting retry/backoff/circuit-breaker). Entries are removed
+     * only after a 2xx accept or a permanent (non-429 4xx) drop.
+     *
+     * Mechanism is chosen per runtime: browser → capped `localStorage`
+     * (+ `navigator.sendBeacon` flush on tab close); Node → a filesystem spool in
+     * `<tmpdir>/allstak-offline-queue` (configurable via {@link offlineQueue}.dir);
+     * React Native / custom → a pluggable adapter registered with
+     * `setPersistence(...)` (or a detected global `AsyncStorage`); edge / sandbox
+     * runtimes degrade silently to in-memory. The store is bounded by count,
+     * bytes, and max-age (oldest dropped first) and is fully fail-open.
+     *
+     * Session lifecycle calls (`/sessions/start` + `/end`) are NEVER persisted —
+     * a replayed stale session would skew durations.
+     *
+     * Default: ON. Set `false` to disable persistence entirely (keeps the
+     * existing in-memory buffer behavior).
+     */
+    enableOfflineQueue?: boolean;
+    /** Offline-queue tuning. See {@link enableOfflineQueue}. */
+    offlineQueue?: {
+        /** Node only: spool directory. Default `<tmpdir>/allstak-offline-queue`. */
+        dir?: string;
+        /** Max stored events before the oldest is evicted. */
+        maxEvents?: number;
+        /** Max total stored bytes (approx) before the oldest is evicted. */
+        maxBytes?: number;
+        /** Max age (ms) of a stored event; older entries are dropped on load. */
+        maxAgeMs?: number;
+    };
     user?: {
         id?: string;
         email?: string;
@@ -613,6 +649,9 @@ declare function applyReleaseAutodetect(config: AllStakConfig, gitRunner?: GitRu
 
 declare class AllStakClient {
     private transport;
+    private offlineQueue;
+    private apiKey;
+    private offlineFlushCleanup;
     private config;
     private errors;
     private logs;
@@ -780,8 +819,22 @@ declare class AllStakClient {
     /** Reset trace context (trace ID and span stack). */
     resetTrace(): void;
     destroy(): void;
+    private uninstallOfflineFlushHooks;
     private shouldCaptureScreenshot;
     private withScreenshotMetadata;
+    /**
+     * On graceful shutdown spill any still-buffered telemetry into the
+     * persistent store so it survives a restart.
+     *
+     * In the browser we ALSO try a best-effort `navigator.sendBeacon` for each
+     * buffered event on `pagehide` / `visibilitychange('hidden')` so in-flight
+     * events have a chance to leave the tab before it closes; whatever the
+     * beacon can't take is persisted for the next page load. Session lifecycle
+     * paths are skipped (the SessionTracker owns its own end-of-session beacon).
+     * Fail-open throughout.
+     */
+    private installOfflineFlushHooks;
+    private flushOfflineOnHide;
     private nodeUncaughtHandler;
     private nodeRejectionHandler;
     private installNodeErrorHandlers;

@@ -1,14 +1,10 @@
-import { createRequire as __allstakCreateRequire } from 'node:module';
-const require = __allstakCreateRequire(import.meta.url);
 import {
+  __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-2Z2PH3DC.mjs";
-import {
-  __require
-} from "./chunk-6GVGKK5H.mjs";
+} from "./chunk-KENGFPTD.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -17,13 +13,20 @@ var EventBuffer = class {
     this.queue = [];
   }
   push(event) {
-    let dropped = false;
+    return this.pushReturningEvicted(event) !== null;
+  }
+  /**
+   * Like {@link push} but returns the OLDEST item that was evicted to make
+   * room (or `null` when nothing was dropped). The transport uses the evictee
+   * to spill into the persistent offline store instead of losing it.
+   */
+  pushReturningEvicted(event) {
+    let evicted = null;
     if (this.queue.length >= MAX_BUFFER_SIZE) {
-      this.queue.shift();
-      dropped = true;
+      evicted = this.queue.shift() ?? null;
     }
     this.queue.push(event);
-    return dropped;
+    return evicted;
   }
   drain() {
     const items = [...this.queue];
@@ -37,6 +40,343 @@ var EventBuffer = class {
     return [...this.queue];
   }
 };
+
+// src/transport/offline-queue.ts
+var BROWSER_MAX_EVENTS = 50;
+var BROWSER_MAX_BYTES = 1e6;
+var NODE_MAX_EVENTS = 500;
+var NODE_MAX_BYTES = 5e6;
+var DEFAULT_MAX_AGE_MS = 48 * 60 * 60 * 1e3;
+var STORAGE_KEY = "allstak.offline.v1";
+var idCounter = 0;
+function nextPersistedId() {
+  idCounter = (idCounter + 1) % 1e6;
+  return `${Date.now().toString(36)}-${idCounter.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+function entryBytes(event) {
+  try {
+    return JSON.stringify(event).length;
+  } catch {
+    return 0;
+  }
+}
+function applyBounds(list, maxEvents, maxBytes, maxAgeMs) {
+  const now = Date.now();
+  let dropped = 0;
+  let kept = list.filter((e) => {
+    const fresh = now - e.ts <= maxAgeMs;
+    if (!fresh) dropped++;
+    return fresh;
+  });
+  while (kept.length > maxEvents) {
+    kept.shift();
+    dropped++;
+  }
+  let total = kept.reduce((sum, e) => sum + entryBytes(e), 0);
+  while (kept.length > 0 && total > maxBytes) {
+    const removed = kept.shift();
+    total -= entryBytes(removed);
+    dropped++;
+  }
+  return { kept, dropped };
+}
+var NoopOfflineQueue = class {
+  enqueue() {
+  }
+  load() {
+    return [];
+  }
+  remove() {
+  }
+  clear() {
+  }
+};
+var LocalStorageOfflineQueue = class {
+  constructor(storage, maxEvents, maxBytes, maxAgeMs, key = STORAGE_KEY) {
+    this.storage = storage;
+    this.maxEvents = maxEvents;
+    this.maxBytes = maxBytes;
+    this.maxAgeMs = maxAgeMs;
+    this.key = key;
+  }
+  read() {
+    try {
+      const raw = this.storage.getItem(this.key);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(isPersistedEvent);
+    } catch {
+      return [];
+    }
+  }
+  write(list) {
+    try {
+      const { kept } = applyBounds(list, this.maxEvents, this.maxBytes, this.maxAgeMs);
+      if (kept.length === 0) {
+        this.storage.removeItem(this.key);
+        return;
+      }
+      this.storage.setItem(this.key, JSON.stringify(kept));
+    } catch {
+    }
+  }
+  enqueue(event) {
+    const list = this.read().filter((e) => e.id !== event.id);
+    list.push(event);
+    this.write(list);
+  }
+  load() {
+    const list = this.read();
+    this.write(list);
+    return this.read();
+  }
+  remove(id) {
+    const list = this.read().filter((e) => e.id !== id);
+    this.write(list);
+  }
+  clear() {
+    try {
+      this.storage.removeItem(this.key);
+    } catch {
+    }
+  }
+};
+var AdapterOfflineQueue = class {
+  constructor(adapter, maxEvents, maxBytes, maxAgeMs, key = STORAGE_KEY) {
+    this.adapter = adapter;
+    this.maxEvents = maxEvents;
+    this.maxBytes = maxBytes;
+    this.maxAgeMs = maxAgeMs;
+    this.key = key;
+    this.mirror = [];
+    this.hydrated = false;
+    this.hydrate();
+  }
+  hydrate() {
+    try {
+      const got = this.adapter.getItem(this.key);
+      if (isThenable(got)) {
+        got.then((raw) => {
+          this.mirror = parseList(raw);
+          this.hydrated = true;
+        }).catch(() => {
+          this.hydrated = true;
+        });
+      } else {
+        this.mirror = parseList(got);
+        this.hydrated = true;
+      }
+    } catch {
+      this.hydrated = true;
+    }
+  }
+  flush() {
+    try {
+      const { kept } = applyBounds(this.mirror, this.maxEvents, this.maxBytes, this.maxAgeMs);
+      this.mirror = kept;
+      const r = this.adapter.setItem(this.key, JSON.stringify(kept));
+      if (isThenable(r)) r.catch(() => void 0);
+    } catch {
+    }
+  }
+  enqueue(event) {
+    this.mirror = this.mirror.filter((e) => e.id !== event.id);
+    this.mirror.push(event);
+    this.flush();
+  }
+  load() {
+    const { kept } = applyBounds(this.mirror, this.maxEvents, this.maxBytes, this.maxAgeMs);
+    this.mirror = kept;
+    return [...kept];
+  }
+  remove(id) {
+    this.mirror = this.mirror.filter((e) => e.id !== id);
+    this.flush();
+  }
+  clear() {
+    this.mirror = [];
+    try {
+      const r = this.adapter.removeItem(this.key);
+      if (isThenable(r)) r.catch(() => void 0);
+    } catch {
+    }
+  }
+  /** @internal test seam */
+  isHydrated() {
+    return this.hydrated;
+  }
+};
+var FsOfflineQueue = class {
+  constructor(fs, dir, maxEvents, maxBytes, maxAgeMs) {
+    this.fs = fs;
+    this.dir = dir;
+    this.maxEvents = maxEvents;
+    this.maxBytes = maxBytes;
+    this.maxAgeMs = maxAgeMs;
+    this.fs.mkdirSync(this.dir, { recursive: true });
+  }
+  fileFor(id) {
+    const safe = id.replace(/[^a-zA-Z0-9._-]/g, "_");
+    return `${this.dir}/allstak-${safe}.json`;
+  }
+  listFiles() {
+    try {
+      return this.fs.readdirSync(this.dir).filter((f) => f.startsWith("allstak-") && f.endsWith(".json")).sort();
+    } catch {
+      return [];
+    }
+  }
+  enqueue(event) {
+    try {
+      this.fs.writeFileSync(this.fileFor(event.id), JSON.stringify(event));
+      this.enforceBounds();
+    } catch {
+    }
+  }
+  load() {
+    const out = [];
+    for (const f of this.listFiles()) {
+      const full = `${this.dir}/${f}`;
+      try {
+        const parsed = JSON.parse(this.fs.readFileSync(full, "utf8"));
+        if (isPersistedEvent(parsed)) out.push(parsed);
+        else this.safeUnlink(full);
+      } catch {
+        this.safeUnlink(full);
+      }
+    }
+    out.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
+    const { kept } = applyBounds(out, this.maxEvents, this.maxBytes, this.maxAgeMs);
+    const keepIds = new Set(kept.map((e) => e.id));
+    for (const e of out) if (!keepIds.has(e.id)) this.safeUnlink(this.fileFor(e.id));
+    return kept;
+  }
+  remove(id) {
+    this.safeUnlink(this.fileFor(id));
+  }
+  clear() {
+    for (const f of this.listFiles()) this.safeUnlink(`${this.dir}/${f}`);
+  }
+  enforceBounds() {
+    const events = this.load();
+    void events;
+  }
+  safeUnlink(full) {
+    try {
+      this.fs.unlinkSync(full);
+    } catch {
+    }
+  }
+};
+var injectedAdapter = null;
+function setPersistence(adapter) {
+  injectedAdapter = adapter && typeof adapter.getItem === "function" ? adapter : null;
+}
+function detectGlobalAsyncStorage() {
+  try {
+    const g = globalThis;
+    const candidate = g.AsyncStorage ?? g.__ALLSTAK_ASYNC_STORAGE__;
+    if (candidate && typeof candidate.getItem === "function" && typeof candidate.setItem === "function" && typeof candidate.removeItem === "function") {
+      return candidate;
+    }
+  } catch {
+  }
+  return null;
+}
+function isNodeRuntime() {
+  try {
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined" || typeof process !== "undefined" && !!process.versions?.node && typeof window === "undefined";
+  } catch {
+    return false;
+  }
+}
+function getLocalStorage() {
+  try {
+    if (typeof window === "undefined") return null;
+    const ls = window.localStorage;
+    if (!ls) return null;
+    const probe = "__allstak_probe__";
+    ls.setItem(probe, "1");
+    ls.removeItem(probe);
+    return ls;
+  } catch {
+    return null;
+  }
+}
+function loadNodeFs() {
+  try {
+    if (!isNodeRuntime()) return null;
+    const proc = globalThis.process;
+    const fromProcess = proc?.getBuiltinModule?.("node:fs");
+    if (fromProcess) return fromProcess;
+    const req = typeof __require === "function" ? __require : void 0;
+    return req ? req("node:fs") : null;
+  } catch {
+    return null;
+  }
+}
+function defaultNodeDir() {
+  try {
+    const proc = globalThis.process;
+    const os = proc?.getBuiltinModule?.("node:os") ?? // eslint-disable-next-line @typescript-eslint/no-require-imports
+    (typeof __require === "function" ? __require("os") : null);
+    const tmp = os?.tmpdir?.() ?? "/tmp";
+    return `${tmp.replace(/\/$/, "")}/allstak-offline-queue`;
+  } catch {
+    return "/tmp/allstak-offline-queue";
+  }
+}
+function createOfflineQueue(options = {}) {
+  try {
+    if (options.enabled === false) return new NoopOfflineQueue();
+    const node = isNodeRuntime();
+    const maxEvents = options.maxEvents ?? (node ? NODE_MAX_EVENTS : BROWSER_MAX_EVENTS);
+    const maxBytes = options.maxBytes ?? (node ? NODE_MAX_BYTES : BROWSER_MAX_BYTES);
+    const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
+    const adapter = options.adapter ?? injectedAdapter;
+    if (adapter && typeof adapter.getItem === "function") {
+      return new AdapterOfflineQueue(adapter, maxEvents, maxBytes, maxAgeMs);
+    }
+    if (node) {
+      const fs = loadNodeFs();
+      const dir = options.dir ?? defaultNodeDir();
+      if (fs) {
+        try {
+          return new FsOfflineQueue(fs, dir, maxEvents, maxBytes, maxAgeMs);
+        } catch {
+          return new NoopOfflineQueue();
+        }
+      }
+      return new NoopOfflineQueue();
+    }
+    const ls = getLocalStorage();
+    if (ls) return new LocalStorageOfflineQueue(ls, maxEvents, maxBytes, maxAgeMs);
+    const detected = detectGlobalAsyncStorage();
+    if (detected) return new AdapterOfflineQueue(detected, maxEvents, maxBytes, maxAgeMs);
+    return new NoopOfflineQueue();
+  } catch {
+    return new NoopOfflineQueue();
+  }
+}
+function isPersistedEvent(v) {
+  return !!v && typeof v === "object" && typeof v.id === "string" && typeof v.path === "string" && typeof v.ts === "number";
+}
+function parseList(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isPersistedEvent) : [];
+  } catch {
+    return [];
+  }
+}
+function isThenable(v) {
+  return !!v && (typeof v === "object" || typeof v === "function") && typeof v.then === "function";
+}
+function isPersistablePath(path) {
+  return !path.startsWith("/ingest/v1/sessions/");
+}
 
 // src/transport/http.ts
 var REQUEST_TIMEOUT = 2e3;
@@ -53,7 +393,7 @@ var HttpResponseError = class extends Error {
   }
 };
 var HttpTransport = class {
-  constructor(baseUrl, apiKey) {
+  constructor(baseUrl, apiKey, offlineQueue) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.buffer = new EventBuffer();
@@ -64,6 +404,10 @@ var HttpTransport = class {
     this.sent = 0;
     this.failed = 0;
     this.dropped = 0;
+    this.persisted = 0;
+    this.replayed = 0;
+    this.offlineQueue = offlineQueue ?? new NoopOfflineQueue();
+    this.offlineEnabled = !!offlineQueue && !(offlineQueue instanceof NoopOfflineQueue);
   }
   send(path, payload) {
     this.enqueueOrDispatch({ path, payload });
@@ -71,10 +415,21 @@ var HttpTransport = class {
   }
   enqueueOrDispatch(item) {
     if (Date.now() < this.circuitOpenUntil) {
-      if (this.buffer.push(item)) this.dropped++;
+      this.bufferOrPersist(item);
       return;
     }
     this.track(this.dispatch(item));
+  }
+  /**
+   * Push an item back onto the in-memory buffer. If the buffer is full the
+   * OLDEST item is evicted — instead of dropping that evictee on the floor we
+   * persist it to the offline store (already PII-scrubbed) so it survives a
+   * restart/outage and is replayed on the next init. Session lifecycle paths
+   * are never persisted. Fully fail-open.
+   */
+  bufferOrPersist(item) {
+    const evicted = this.buffer.pushReturningEvicted(item);
+    if (evicted) this.persistOne(evicted);
   }
   track(promise) {
     this.inFlight.add(promise);
@@ -83,15 +438,44 @@ var HttpTransport = class {
   async dispatch(item) {
     try {
       await this.doFetch(`${this.baseUrl}${item.path}`, item.payload);
-      this.sent++;
-      this.consecutiveFailures = 0;
-      this.circuitOpenUntil = 0;
+      this.onSendSuccess(item);
       this.scheduleFlush();
     } catch (err) {
-      this.failed++;
-      this.recordFailure(err);
-      if (this.buffer.push(item)) this.dropped++;
+      this.onSendFailure(item, err);
     }
+  }
+  /** A 2xx (or replay) succeeded: clear the persisted copy if this was one. */
+  onSendSuccess(item) {
+    this.sent++;
+    this.consecutiveFailures = 0;
+    this.circuitOpenUntil = 0;
+    if (item.persistId) {
+      try {
+        this.offlineQueue.remove(item.persistId);
+      } catch {
+      }
+    }
+  }
+  /**
+   * A send failed. Transient errors (network, 429, 5xx) re-buffer the item
+   * (spilling the buffer evictee to the offline store). A PERMANENT failure
+   * — a 4xx other than 429 — means the server will never accept this payload,
+   * so we drop it and remove any persisted copy rather than replaying forever.
+   */
+  onSendFailure(item, err) {
+    this.failed++;
+    this.recordFailure(err);
+    if (isPermanentFailure(err)) {
+      this.dropped++;
+      if (item.persistId) {
+        try {
+          this.offlineQueue.remove(item.persistId);
+        } catch {
+        }
+      }
+      return;
+    }
+    this.bufferOrPersist(item);
   }
   async doFetch(url, payload) {
     const controller = new AbortController();
@@ -133,18 +517,14 @@ var HttpTransport = class {
       const items = this.buffer.drain();
       for (const item of items) {
         if (Date.now() < this.circuitOpenUntil) {
-          if (this.buffer.push(item)) this.dropped++;
+          this.bufferOrPersist(item);
           continue;
         }
         try {
           await this.doFetch(`${this.baseUrl}${item.path}`, item.payload);
-          this.sent++;
-          this.consecutiveFailures = 0;
-          this.circuitOpenUntil = 0;
+          this.onSendSuccess(item);
         } catch (err) {
-          this.failed++;
-          this.recordFailure(err);
-          if (this.buffer.push(item)) this.dropped++;
+          this.onSendFailure(item, err);
         }
       }
     } catch {
@@ -163,6 +543,81 @@ var HttpTransport = class {
   }
   getBufferSize() {
     return this.buffer.size;
+  }
+  /**
+   * Replay events persisted by a previous process/session (offline queue).
+   * Loads the store, re-sends each entry through the existing transport (so it
+   * honours the same retry/backoff/circuit-breaker), and removes an entry only
+   * once it is accepted (2xx) or permanently undeliverable (non-429 4xx).
+   * Transient failures keep the entry in the store for the NEXT init.
+   *
+   * Runs asynchronously and is fully fail-open — it never throws and never
+   * blocks init. Items carry their `persistId` so a successful send clears the
+   * stored copy in {@link onSendSuccess}.
+   */
+  drainPersisted() {
+    let persistedItems;
+    try {
+      persistedItems = this.offlineQueue.load();
+    } catch {
+      return;
+    }
+    if (persistedItems.length === 0) return;
+    for (const entry of persistedItems) {
+      if (!isPersistablePath(entry.path)) {
+        try {
+          this.offlineQueue.remove(entry.id);
+        } catch {
+        }
+        continue;
+      }
+      this.replayed++;
+      this.enqueueOrDispatch({ path: entry.path, payload: entry.payload, persistId: entry.id });
+    }
+  }
+  /**
+   * Spill everything still buffered in memory into the persistent store. Called
+   * on graceful shutdown (process exit / tab close) so in-flight telemetry that
+   * could not be flushed in time survives a restart instead of being dropped.
+   * Session lifecycle paths are skipped. Fail-open.
+   */
+  persistBufferedNow() {
+    let items;
+    try {
+      items = this.buffer.drain();
+    } catch {
+      return;
+    }
+    for (const item of items) this.persistOne(item);
+  }
+  /**
+   * Drain the in-memory buffer and hand the items to the caller. Used by the
+   * browser unload path so the client can attempt a `navigator.sendBeacon` for
+   * each event and persist only what the beacon could not take. Fail-open.
+   */
+  drainBufferForUnload() {
+    try {
+      return this.buffer.drain();
+    } catch {
+      return [];
+    }
+  }
+  /**
+   * Persist a single already-scrubbed item to the offline store. Session
+   * lifecycle paths are skipped (counted as a real drop). Fail-open.
+   */
+  persistOne(item) {
+    if (!this.offlineEnabled || !isPersistablePath(item.path)) {
+      this.dropped++;
+      return;
+    }
+    try {
+      const id = item.persistId ?? nextPersistedId();
+      this.offlineQueue.enqueue({ id, path: item.path, payload: item.payload, ts: Date.now() });
+      this.persisted++;
+    } catch {
+      this.dropped++;
+    }
   }
   async flush(timeoutMs = 2e3) {
     const deadline = Date.now() + timeoutMs;
@@ -191,10 +646,16 @@ var HttpTransport = class {
       consecutiveFailures: this.consecutiveFailures,
       circuitOpenUntil: this.circuitOpenUntil,
       lastTransportLatencyMs: this.lastTransportLatencyMs,
-      lastFlushDurationMs: this.lastFlushDurationMs
+      lastFlushDurationMs: this.lastFlushDurationMs,
+      persisted: this.persisted,
+      replayed: this.replayed
     };
   }
 };
+function isPermanentFailure(error) {
+  if (!(error instanceof HttpResponseError)) return false;
+  return error.status >= 400 && error.status < 500 && error.status !== 429;
+}
 function jitteredBackoff(failures) {
   const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(8, failures - FAILURE_THRESHOLD));
   return Math.floor(exp / 2 + Math.random() * (exp / 2));
@@ -1546,7 +2007,7 @@ var TracingModule = class {
 };
 function createAsyncTraceStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -1662,7 +2123,7 @@ function registerRuntimeRelease(options) {
 }
 function isTestRuntime() {
   try {
-    return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+    return process.env.VITEST === "true";
   } catch {
     return false;
   }
@@ -1709,7 +2170,7 @@ var Session = class {
 function isTestRuntime2() {
   try {
     if (typeof process !== "undefined" && process.env) {
-      return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+      return process.env.VITEST === "true";
     }
   } catch {
   }
@@ -2542,7 +3003,7 @@ function normalizeLine(out) {
   const first = out.split("\n")[0]?.trim();
   return first && first.length > 0 ? first : void 0;
 }
-function isNodeRuntime() {
+function isNodeRuntime2() {
   try {
     return typeof process !== "undefined" && !!process.versions && typeof process.versions.node === "string" && // No `window`/`document` → not a DOM/browser host.
     typeof globalThis.window === "undefined" && // React Native sets navigator.product === 'ReactNative'.
@@ -2552,7 +3013,7 @@ function isNodeRuntime() {
   }
 }
 function createNodeGitRunner(timeoutMs = 1500) {
-  if (!isNodeRuntime()) return null;
+  if (!isNodeRuntime2()) return null;
   let cp;
   try {
     const req = typeof __require === "function" ? __require : (
@@ -2725,6 +3186,9 @@ function resolveTransport(config) {
 }
 var AllStakClient = class {
   constructor(config) {
+    this.offlineQueue = null;
+    this.apiKey = "";
+    this.offlineFlushCleanup = [];
     this.integrations = {};
     this.sessionReplay = null;
     this.sessionTracker = null;
@@ -2738,7 +3202,22 @@ var AllStakClient = class {
     this.sessionId = generateId();
     const { baseUrl, apiKey } = resolveTransport(config);
     this.baseUrl = baseUrl;
-    this.transport = new HttpTransport(baseUrl, apiKey);
+    this.apiKey = apiKey;
+    this.offlineQueue = createOfflineQueue({
+      enabled: config.enableOfflineQueue,
+      dir: config.offlineQueue?.dir,
+      maxEvents: config.offlineQueue?.maxEvents,
+      maxBytes: config.offlineQueue?.maxBytes,
+      maxAgeMs: config.offlineQueue?.maxAgeMs
+    });
+    this.transport = new HttpTransport(baseUrl, apiKey, this.offlineQueue);
+    if (config.enableOfflineQueue !== false) {
+      try {
+        this.transport.drainPersisted();
+      } catch {
+      }
+      this.installOfflineFlushHooks();
+    }
     if (config.autoRegisterRelease !== false) {
       registerRuntimeRelease({
         host: baseUrl,
@@ -2801,7 +3280,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
   }
   isNodeRuntime() {
     return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
@@ -3204,6 +3683,16 @@ var AllStakClient = class {
     this._database.destroy();
     this.sessionReplay?.destroy();
     this.uninstallNodeErrorHandlers();
+    this.uninstallOfflineFlushHooks();
+  }
+  uninstallOfflineFlushHooks() {
+    for (const fn of this.offlineFlushCleanup) {
+      try {
+        fn();
+      } catch {
+      }
+    }
+    this.offlineFlushCleanup = [];
   }
   shouldCaptureScreenshot() {
     const screenshot = this.config.screenshot;
@@ -3244,6 +3733,76 @@ var AllStakClient = class {
       };
     } catch {
       return { ...context, "screenshot.status": "failed" };
+    }
+  }
+  // ─── Offline-queue shutdown flush ────────────────────────────────
+  /**
+   * On graceful shutdown spill any still-buffered telemetry into the
+   * persistent store so it survives a restart.
+   *
+   * In the browser we ALSO try a best-effort `navigator.sendBeacon` for each
+   * buffered event on `pagehide` / `visibilitychange('hidden')` so in-flight
+   * events have a chance to leave the tab before it closes; whatever the
+   * beacon can't take is persisted for the next page load. Session lifecycle
+   * paths are skipped (the SessionTracker owns its own end-of-session beacon).
+   * Fail-open throughout.
+   */
+  installOfflineFlushHooks() {
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      const onHide = () => this.flushOfflineOnHide();
+      const onVisibility = () => {
+        if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+          this.flushOfflineOnHide();
+        }
+      };
+      window.addEventListener("pagehide", onHide);
+      this.offlineFlushCleanup.push(() => window.removeEventListener("pagehide", onHide));
+      if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+        document.addEventListener("visibilitychange", onVisibility);
+        this.offlineFlushCleanup.push(
+          () => document.removeEventListener("visibilitychange", onVisibility)
+        );
+      }
+      return;
+    }
+    if (typeof process !== "undefined" && typeof process.on === "function") {
+      const onExit = () => {
+        try {
+          this.transport.persistBufferedNow();
+        } catch {
+        }
+      };
+      process.on("beforeExit", onExit);
+      process.on("SIGTERM", onExit);
+      this.offlineFlushCleanup.push(() => {
+        if (typeof process.off === "function") {
+          process.off("beforeExit", onExit);
+          process.off("SIGTERM", onExit);
+        }
+      });
+    }
+  }
+  flushOfflineOnHide() {
+    try {
+      const drained = this.transport.drainBufferForUnload();
+      const nav = typeof navigator !== "undefined" ? navigator : void 0;
+      const canBeacon = !!nav && typeof nav.sendBeacon === "function";
+      for (const item of drained) {
+        let beaconed = false;
+        if (canBeacon && isPersistablePath(item.path)) {
+          try {
+            const blob = new Blob([JSON.stringify(item.payload)], { type: "application/json" });
+            beaconed = nav.sendBeacon(
+              `${this.baseUrl}${item.path}?k=${encodeURIComponent(this.apiKey)}`,
+              blob
+            );
+          } catch {
+            beaconed = false;
+          }
+        }
+        if (!beaconed) this.transport.persistOne(item);
+      }
+    } catch {
     }
   }
   installNodeErrorHandlers() {
@@ -3291,7 +3850,7 @@ var AllStakClient = class {
 };
 function createAsyncScopeStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -3494,6 +4053,8 @@ function ensureInit() {
 }
 
 export {
+  setPersistence,
+  createOfflineQueue,
   redactValue,
   redactHeaderRecord,
   Span,
@@ -3511,11 +4072,12 @@ export {
   inboundFiltersIntegration,
   httpClientIntegration,
   parseGitRelease,
-  isNodeRuntime,
+  isNodeRuntime2 as isNodeRuntime,
   detectGitRelease,
   Scope,
+  SDK_VERSION,
   applyReleaseAutodetect,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-HYMEGEOH.mjs.map
+//# sourceMappingURL=chunk-PVMCT2AH.mjs.map

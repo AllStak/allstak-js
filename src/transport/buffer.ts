@@ -4,13 +4,21 @@ export class EventBuffer {
   private queue: unknown[] = [];
 
   push(event: unknown): boolean {
-    let dropped = false;
+    return this.pushReturningEvicted(event) !== null;
+  }
+
+  /**
+   * Like {@link push} but returns the OLDEST item that was evicted to make
+   * room (or `null` when nothing was dropped). The transport uses the evictee
+   * to spill into the persistent offline store instead of losing it.
+   */
+  pushReturningEvicted(event: unknown): unknown | null {
+    let evicted: unknown | null = null;
     if (this.queue.length >= MAX_BUFFER_SIZE) {
-      this.queue.shift(); // drop oldest
-      dropped = true;
+      evicted = this.queue.shift() ?? null; // drop oldest
     }
     this.queue.push(event);
-    return dropped;
+    return evicted;
   }
 
   drain(): unknown[] {

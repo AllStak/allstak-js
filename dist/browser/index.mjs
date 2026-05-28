@@ -9,6 +9,7 @@ import {
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
   consoleIntegration,
+  createOfflineQueue,
   databaseIntegration,
   dedupeIntegration,
   defineIntegration,
@@ -19,8 +20,9 @@ import {
   isNodeRuntime,
   parseGitRelease,
   registerRuntimeRelease,
+  setPersistence,
   src_default
-} from "./chunk-NRDJOATR.mjs";
+} from "./chunk-PVMCT2AH.mjs";
 import "./chunk-KENGFPTD.mjs";
 export {
   AllStak,
@@ -33,6 +35,7 @@ export {
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
   consoleIntegration,
+  createOfflineQueue,
   databaseIntegration,
   dedupeIntegration,
   src_default as default,
@@ -43,6 +46,7 @@ export {
   inboundFiltersIntegration,
   isNodeRuntime,
   parseGitRelease,
-  registerRuntimeRelease
+  registerRuntimeRelease,
+  setPersistence
 };
 //# sourceMappingURL=index.mjs.map
