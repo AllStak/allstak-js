@@ -33,7 +33,7 @@ describe('Log Module', () => {
     },
   );
 
-  it('meta object is included in payload', async () => {
+  it('meta object is included in payload, with free-text IP scrubbed (sendDefaultPii default false)', async () => {
     AllStak.log.info('user login', { userId: '42', ip: '10.0.0.1' });
 
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
@@ -41,6 +41,23 @@ describe('Log Module', () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     // metadata may also include auto-injected traceId/spanId from the
     // log() wrapper, in addition to the caller's own meta keys.
+    // The non-PII userId passes through; the free-text IPv4 value is scrubbed
+    // by default (Sentry data-scrubbing parity — sendDefaultPii defaults false).
+    expect(body.metadata).toMatchObject({ userId: '42', ip: '[REDACTED]' });
+  });
+
+  it('preserves free-text IP when sendDefaultPii is true', async () => {
+    AllStak.destroy();
+    vi.restoreAllMocks();
+    const piiSpy = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', piiSpy);
+    AllStak.init({ dsn: TEST_DSN, environment: 'test', sendDefaultPii: true });
+
+    AllStak.log.info('user login', { userId: '42', ip: '10.0.0.1' });
+
+    await vi.waitFor(() => expect(piiSpy).toHaveBeenCalledTimes(1));
+
+    const body = JSON.parse(piiSpy.mock.calls[0][1].body);
     expect(body.metadata).toMatchObject({ userId: '42', ip: '10.0.0.1' });
   });
 

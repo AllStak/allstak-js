@@ -1,6 +1,6 @@
 import { HttpTransport } from '../transport/http';
 import { AllStakConfig } from '../client';
-import { redactObject } from '../utils/redact';
+import { redactObject, scrubStringValue, ValueScrubOptions } from '../utils/redact';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
@@ -59,12 +59,18 @@ export class LogModule {
     // Redact caller-supplied metadata before serialisation. The structural
     // routing fields below (service/traceId/etc.) are read from the raw
     // `meta` since they're SDK-controlled scalar identifiers, never secrets.
+    // Value-pattern scrubbing (CC/SSN always; email/IP unless sendDefaultPii)
+    // also runs over the free-text message + attribute values.
     const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
-    const safeMeta = redactObject(meta, { extraKeys });
+    const scrub: ValueScrubOptions = {
+      scrubValues: true,
+      sendDefaultPii: (this.config as any).sendDefaultPii === true,
+    };
+    const safeMeta = redactObject(meta, { extraKeys, ...scrub });
 
     const payload: LogIngestPayload = {
       level,
-      message,
+      message: scrubStringValue(message, scrub),
       service: (meta?.service as string | undefined) ?? this.config.tags?.service,
       traceId: meta?.traceId as string | undefined,
       environment: (meta?.environment as string | undefined) ?? this.config.environment,

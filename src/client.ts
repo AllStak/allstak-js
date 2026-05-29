@@ -163,6 +163,27 @@ export interface AllStakConfig extends ReleaseMetadata {
   };
   user?: { id?: string; email?: string };
   tags?: Record<string, string>;
+  /**
+   * Send personally-identifiable information that the SDK would otherwise
+   * scrub from free-text VALUES. Default `false` (Sentry parity).
+   *
+   * Layering (see {@link import('./utils/redact')}):
+   *   - ALWAYS scrubbed regardless of this flag: Luhn-valid credit-card
+   *     numbers and dashed US SSNs found in string values.
+   *   - Scrubbed ONLY when this is `false`: email addresses and IP addresses
+   *     found in string values. Set `true` to let them through (you opted in).
+   *
+   * This flag does NOT affect the EXPLICIT user object set via {@link user} /
+   * `setUser()` — `user.id` / `user.email` are intentional identification and
+   * always ship as before, matching Sentry. It also does not affect key-based
+   * secret redaction (auth/cookie/token/etc.), which is always on.
+   *
+   * When `false`, any client IP the SDK auto-collects is dropped/masked; when
+   * `true`, auto-collected IP is allowed. (The current SDK does not auto-attach
+   * a client IP to events, so this only governs IPs that appear in free-text
+   * values today.)
+   */
+  sendDefaultPii?: boolean;
   /** Per-event extra data attached to every capture (override per call via context arg). */
   extras?: Record<string, unknown>;
   /** Named context bags (e.g. `app`, `device`). Each lives under `metadata['context.<name>']`. */

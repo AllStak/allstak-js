@@ -2,7 +2,7 @@ import { HttpTransport } from '../transport/http';
 import { AllStakConfig, SDK_NAME, SDK_VERSION } from '../client';
 import { parseStack } from '../utils/stack';
 import { resolveDebugId } from '../utils/debug-id';
-import { redactObject } from '../utils/redact';
+import { redactObject, scrubStringValue, ValueScrubOptions } from '../utils/redact';
 
 export interface ErrorEvent {
   type: 'error';
@@ -303,6 +303,16 @@ export class ErrorModule {
    * `metadata` so they survive the wire even before the backend has dedicated
    * columns. Once those columns land, the ingester reads them out of metadata.
    */
+  /**
+   * Value-pattern scrubbing options derived from config. `scrubValues` is
+   * always on (the always-scrub CC/SSN layer must run); `sendDefaultPii`
+   * gates the email/IP layer. Errors here can't throw — both fields are plain
+   * boolean reads.
+   */
+  private valueScrubOptions(): ValueScrubOptions {
+    return { scrubValues: true, sendDefaultPii: (this.config as any).sendDefaultPii === true };
+  }
+
   private releaseTags(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     if (this.config.sdkName) out['sdk.name'] = this.config.sdkName;
@@ -350,12 +360,17 @@ export class ErrorModule {
     const stackTrace = frames.length > 0 ? frames.map(frameToString) : undefined;
 
     // Drain breadcrumbs and attach to the error payload. Each breadcrumb's
-    // free-form `data` field is caller-controlled, so it must go through
-    // the same redactor as captureException's context arg.
+    // free-form `message` + `data` are caller-controlled, so they go through
+    // the same key-redactor AND value-pattern scrubber as the error message.
     const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
+    const scrub = this.valueScrubOptions();
     const currentBreadcrumbs =
       this.breadcrumbs.length > 0
-        ? this.breadcrumbs.map((bc) => (bc.data ? { ...bc, data: redactObject(bc.data, { extraKeys }) } : bc))
+        ? this.breadcrumbs.map((bc) => ({
+            ...bc,
+            message: scrubStringValue(bc.message, scrub),
+            ...(bc.data ? { data: redactObject(bc.data, { extraKeys, ...scrub }) } : {}),
+          }))
         : undefined;
     this.breadcrumbs = [];
 
@@ -374,7 +389,9 @@ export class ErrorModule {
       ?? (requestCtx?.method && requestCtx?.path ? `${requestCtx.method} ${requestCtx.path}` : undefined);
     const payload: any = {
       exceptionClass,
-      message: error.message,
+      // Scrub PII that leaked into the exception message free text. The
+      // exceptionClass is a type name, not user data, so it is left intact.
+      message: scrubStringValue(error.message, scrub),
       stackTrace,
       frames: frames.length > 0 ? frames : undefined,
       debugMeta,
@@ -415,7 +432,8 @@ export class ErrorModule {
     const callerMeta = options?.metadata ?? options?.data;
     const payload: any = {
       exceptionClass: 'Message',
-      message,
+      // Free-text message: value-pattern scrub PII the same way as exceptions.
+      message: scrubStringValue(message, this.valueScrubOptions()),
       platform,
       sdkName: this.config.sdkName ?? SDK_NAME,
       sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
@@ -448,13 +466,19 @@ export class ErrorModule {
     requestCtx?: ErrorRequestContext,
     transaction?: string,
   ): Record<string, unknown> {
-    // Redact caller-owned inputs (per-call context, configured tags/extras)
-    // BEFORE merging so the assembled metadata is safe by construction.
-    // Release tags are SDK-owned and not subject to redaction.
+    // Redact caller-owned inputs (per-call context, configured tags/extras,
+    // named contexts) BEFORE merging so the assembled metadata is safe by
+    // construction. Key-based redaction removes named secrets; value-pattern
+    // scrubbing (CC/SSN always, email/IP unless sendDefaultPii) strips PII that
+    // leaked into free-text values. Release tags / runtime metadata / request
+    // metadata are SDK-owned (type names, URL components, request shape) and
+    // keep their existing handling — they are not free-text value sinks.
     const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
-    const safePerCall = redactObject(perCallContext, { extraKeys });
-    const safeTags = redactObject(this.config.tags as Record<string, unknown> | undefined, { extraKeys });
-    const safeExtras = redactObject((this.config as any).extras as Record<string, unknown> | undefined, { extraKeys });
+    const scrub = this.valueScrubOptions();
+    const opts = { extraKeys, ...scrub };
+    const safePerCall = redactObject(perCallContext, opts);
+    const safeTags = redactObject(this.config.tags as Record<string, unknown> | undefined, opts);
+    const safeExtras = redactObject((this.config as any).extras as Record<string, unknown> | undefined, opts);
     const out: Record<string, unknown> = {
       ...this.releaseTags(),
       ...runtimeMetadata(platform),
@@ -468,7 +492,7 @@ export class ErrorModule {
     const contexts = (this.config as any).contexts as Record<string, Record<string, unknown>> | undefined;
     if (contexts) {
       for (const [name, ctx] of Object.entries(contexts)) {
-        out[`context.${name}`] = ctx;
+        out[`context.${name}`] = redactObject(ctx, opts) ?? ctx;
       }
     }
     return out;

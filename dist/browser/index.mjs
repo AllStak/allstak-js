@@ -22,7 +22,7 @@ import {
   registerRuntimeRelease,
   setPersistence,
   src_default
-} from "./chunk-PVMCT2AH.mjs";
+} from "./chunk-JUF2EQFR.mjs";
 import "./chunk-KENGFPTD.mjs";
 export {
   AllStak,

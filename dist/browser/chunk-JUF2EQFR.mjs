@@ -1,14 +1,10 @@
-import { createRequire as __allstakCreateRequire } from 'node:module';
-const require = __allstakCreateRequire(import.meta.url);
 import {
+  __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-2Z2PH3DC.mjs";
-import {
-  __require
-} from "./chunk-6GVGKK5H.mjs";
+} from "./chunk-KENGFPTD.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -290,7 +286,7 @@ function detectGlobalAsyncStorage() {
 }
 function isNodeRuntime() {
   try {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined" || typeof process !== "undefined" && !!process.versions?.node && typeof window === "undefined";
   } catch {
     return false;
   }
@@ -842,24 +838,86 @@ function compileExtraPatterns(extra) {
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+var MAX_SCAN_LEN = 16384;
+var CC_CANDIDATE = /(?<![\d])(?:\d[ -]?){12,18}\d(?![\d])/g;
+var SSN = /\b\d{3}-\d{2}-\d{4}\b/g;
+var EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+var IPV4 = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g;
+var IPV6 = /\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z]+)?\b|\b::(?:[0-9A-Fa-f]{1,4}:){0,6}[0-9A-Fa-f]{1,4}\b/g;
+function passesLuhn(digits) {
+  let sum = 0;
+  let alt = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (d < 0 || d > 9) return false;
+    if (alt) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+function scrubAlwaysPii(value) {
+  try {
+    let out = value.replace(CC_CANDIDATE, (match) => {
+      const digits = match.replace(/[ -]/g, "");
+      if (digits.length < 13 || digits.length > 19) return match;
+      return passesLuhn(digits) ? REDACTED : match;
+    });
+    out = out.replace(SSN, REDACTED);
+    return out;
+  } catch {
+    return value;
+  }
+}
+function scrubDefaultPii(value) {
+  try {
+    let out = value.replace(EMAIL, REDACTED);
+    out = out.replace(IPV4, REDACTED);
+    out = out.replace(IPV6, REDACTED);
+    return out;
+  } catch {
+    return value;
+  }
+}
+function scrubStringValue(value, opts) {
+  if (!opts.scrubValues) return value;
+  if (value.length === 0 || value.length > MAX_SCAN_LEN) return value;
+  let out = scrubAlwaysPii(value);
+  if (!opts.sendDefaultPii) out = scrubDefaultPii(out);
+  return out;
+}
 function redactObject(input, options = {}) {
   if (input == null) return input;
-  const extra = compileExtraPatterns(options.extraKeys);
-  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
-  const seen = /* @__PURE__ */ new WeakMap();
-  return walk(input, extra, 0, maxDepth, seen);
+  try {
+    const extra = compileExtraPatterns(options.extraKeys);
+    const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const seen = /* @__PURE__ */ new WeakMap();
+    return walk(input, extra, 0, maxDepth, seen, options);
+  } catch {
+    return input;
+  }
 }
 function redactValue(input, options = {}) {
   if (input == null) return input;
-  if (typeof input !== "object") return input;
-  const extra = compileExtraPatterns(options.extraKeys);
-  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
-  const seen = /* @__PURE__ */ new WeakMap();
-  return walk(input, extra, 0, maxDepth, seen);
+  if (typeof input !== "object") {
+    return typeof input === "string" ? scrubStringValue(input, options) : input;
+  }
+  try {
+    const extra = compileExtraPatterns(options.extraKeys);
+    const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const seen = /* @__PURE__ */ new WeakMap();
+    return walk(input, extra, 0, maxDepth, seen, options);
+  } catch {
+    return input;
+  }
 }
-function walk(node, extra, depth, maxDepth, seen) {
+function walk(node, extra, depth, maxDepth, seen, valueOpts) {
   if (node == null) return node;
   const t = typeof node;
+  if (t === "string") return scrubStringValue(node, valueOpts);
   if (t !== "object") return node;
   if (depth >= maxDepth) return "[MaxDepth]";
   const asObj = node;
@@ -868,7 +926,7 @@ function walk(node, extra, depth, maxDepth, seen) {
     const out2 = new Array(node.length);
     seen.set(asObj, out2);
     for (let i = 0; i < node.length; i++) {
-      out2[i] = walk(node[i], extra, depth + 1, maxDepth, seen);
+      out2[i] = walk(node[i], extra, depth + 1, maxDepth, seen, valueOpts);
     }
     return out2;
   }
@@ -883,7 +941,7 @@ function walk(node, extra, depth, maxDepth, seen) {
       out[k] = REDACTED;
       continue;
     }
-    out[k] = walk(v, extra, depth + 1, maxDepth, seen);
+    out[k] = walk(v, extra, depth + 1, maxDepth, seen, valueOpts);
   }
   return out;
 }
@@ -1072,6 +1130,15 @@ var ErrorModule = class {
    * `metadata` so they survive the wire even before the backend has dedicated
    * columns. Once those columns land, the ingester reads them out of metadata.
    */
+  /**
+   * Value-pattern scrubbing options derived from config. `scrubValues` is
+   * always on (the always-scrub CC/SSN layer must run); `sendDefaultPii`
+   * gates the email/IP layer. Errors here can't throw — both fields are plain
+   * boolean reads.
+   */
+  valueScrubOptions() {
+    return { scrubValues: true, sendDefaultPii: this.config.sendDefaultPii === true };
+  }
   releaseTags() {
     const out = {};
     if (this.config.sdkName) out["sdk.name"] = this.config.sdkName;
@@ -1105,7 +1172,12 @@ var ErrorModule = class {
     const debugMeta = debugIdSet.size > 0 ? { images: Array.from(debugIdSet).map((id) => ({ type: "sourcemap", debugId: id })) } : void 0;
     const stackTrace = frames.length > 0 ? frames.map(frameToString) : void 0;
     const extraKeys = this.config.redactKeys;
-    const currentBreadcrumbs = this.breadcrumbs.length > 0 ? this.breadcrumbs.map((bc) => bc.data ? { ...bc, data: redactObject(bc.data, { extraKeys }) } : bc) : void 0;
+    const scrub = this.valueScrubOptions();
+    const currentBreadcrumbs = this.breadcrumbs.length > 0 ? this.breadcrumbs.map((bc) => ({
+      ...bc,
+      message: scrubStringValue(bc.message, scrub),
+      ...bc.data ? { data: redactObject(bc.data, { extraKeys, ...scrub }) } : {}
+    })) : void 0;
     this.breadcrumbs = [];
     if (!this.passesSampleRate()) return;
     const exceptionClass = (error.name && error.name !== "Error" ? error.name : void 0) || error.constructor?.name || "Error";
@@ -1113,7 +1185,9 @@ var ErrorModule = class {
     const transaction = stringContext(context, "transaction") ?? requestCtx?.route ?? (requestCtx?.method && requestCtx?.path ? `${requestCtx.method} ${requestCtx.path}` : void 0);
     const payload = {
       exceptionClass,
-      message: error.message,
+      // Scrub PII that leaked into the exception message free text. The
+      // exceptionClass is a type name, not user data, so it is left intact.
+      message: scrubStringValue(error.message, scrub),
       stackTrace,
       frames: frames.length > 0 ? frames : void 0,
       debugMeta,
@@ -1145,7 +1219,8 @@ var ErrorModule = class {
     const callerMeta = options?.metadata ?? options?.data;
     const payload = {
       exceptionClass: "Message",
-      message,
+      // Free-text message: value-pattern scrub PII the same way as exceptions.
+      message: scrubStringValue(message, this.valueScrubOptions()),
       platform,
       sdkName: this.config.sdkName ?? SDK_NAME,
       sdkVersion: this.config.sdkVersion ?? SDK_VERSION,
@@ -1170,9 +1245,11 @@ var ErrorModule = class {
   }
   buildMetadata(perCallContext, platform = this.config.platform || detectPlatform(), requestCtx, transaction) {
     const extraKeys = this.config.redactKeys;
-    const safePerCall = redactObject(perCallContext, { extraKeys });
-    const safeTags = redactObject(this.config.tags, { extraKeys });
-    const safeExtras = redactObject(this.config.extras, { extraKeys });
+    const scrub = this.valueScrubOptions();
+    const opts = { extraKeys, ...scrub };
+    const safePerCall = redactObject(perCallContext, opts);
+    const safeTags = redactObject(this.config.tags, opts);
+    const safeExtras = redactObject(this.config.extras, opts);
     const out = {
       ...this.releaseTags(),
       ...runtimeMetadata(platform),
@@ -1186,7 +1263,7 @@ var ErrorModule = class {
     const contexts = this.config.contexts;
     if (contexts) {
       for (const [name, ctx] of Object.entries(contexts)) {
-        out[`context.${name}`] = ctx;
+        out[`context.${name}`] = redactObject(ctx, opts) ?? ctx;
       }
     }
     return out;
@@ -1279,10 +1356,14 @@ var LogModule = class {
       this.onLogBreadcrumb(level, message);
     }
     const extraKeys = this.config.redactKeys;
-    const safeMeta = redactObject(meta, { extraKeys });
+    const scrub = {
+      scrubValues: true,
+      sendDefaultPii: this.config.sendDefaultPii === true
+    };
+    const safeMeta = redactObject(meta, { extraKeys, ...scrub });
     const payload = {
       level,
-      message,
+      message: scrubStringValue(message, scrub),
       service: meta?.service ?? this.config.tags?.service,
       traceId: meta?.traceId,
       environment: meta?.environment ?? this.config.environment,
@@ -2011,7 +2092,7 @@ var TracingModule = class {
 };
 function createAsyncTraceStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -2127,7 +2208,7 @@ function registerRuntimeRelease(options) {
 }
 function isTestRuntime() {
   try {
-    return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+    return process.env.VITEST === "true";
   } catch {
     return false;
   }
@@ -2174,7 +2255,7 @@ var Session = class {
 function isTestRuntime2() {
   try {
     if (typeof process !== "undefined" && process.env) {
-      return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+      return process.env.VITEST === "true";
     }
   } catch {
   }
@@ -2601,7 +2682,8 @@ function isSensitiveKey2(key, customFields) {
   return /password|passcode|authorization|cookie|otp|token|jwt|secret|refresh|iban|national.?id|card/i.test(key) || customFields.some((field) => field.toLowerCase() === key.toLowerCase());
 }
 function redactText(value) {
-  return value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]").replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_JWT]").replace(/\b(?:\d[ -]*?){13,19}\b/g, "[REDACTED_CARD]");
+  const tokenScrubbed = value.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]").replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_JWT]");
+  return scrubStringValue(tokenScrubbed, { scrubValues: true, sendDefaultPii: true });
 }
 function generateRequestId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -3284,7 +3366,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
   }
   isNodeRuntime() {
     return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
@@ -3854,7 +3936,7 @@ var AllStakClient = class {
 };
 function createAsyncScopeStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -4079,8 +4161,9 @@ export {
   isNodeRuntime2 as isNodeRuntime,
   detectGitRelease,
   Scope,
+  SDK_VERSION,
   applyReleaseAutodetect,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-HZP5SVKB.mjs.map
+//# sourceMappingURL=chunk-JUF2EQFR.mjs.map

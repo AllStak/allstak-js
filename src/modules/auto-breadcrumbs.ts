@@ -5,6 +5,7 @@
  * delegate to the original implementation.
  */
 import { mergeBaggageValue, normalizeSpanId, normalizeTraceId, type TracePropagationOptions } from './trace-propagation';
+import { scrubStringValue } from '../utils/redact';
 
 type AddBreadcrumbFn = (
   type: string,
@@ -287,10 +288,16 @@ function isSensitiveKey(key: string, customFields: string[]): boolean {
 }
 
 function redactText(value: string): string {
-  return value
+  // Bearer/JWT scrubbing stays here (token-shape, not value-pattern PII).
+  // Credit-card + SSN redaction is delegated to the shared value scrubber so
+  // the Luhn check is applied — a digit run that FAILS Luhn (e.g. an order id
+  // or timestamp) is now preserved instead of being nuked as a fake "card".
+  const tokenScrubbed = value
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]')
-    .replace(/\b(?:\d[ -]*?){13,19}\b/g, '[REDACTED_CARD]');
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]');
+  // Always-on financial/identity layer only (email/IP gating is owned by the
+  // error/log wire path; the HTTP body-capture path stays value-conservative).
+  return scrubStringValue(tokenScrubbed, { scrubValues: true, sendDefaultPii: true });
 }
 
 function generateRequestId(): string {

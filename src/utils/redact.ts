@@ -15,6 +15,23 @@
  *   3. Never mutate the caller-owned input. Always return a fresh object.
  *   4. Detect cycles and short-circuit to '[Circular]' rather than throwing.
  *   5. Hard-cap recursion depth so a hostile input can't crash the SDK.
+ *
+ * VALUE-PATTERN scrubbing (Sentry data-scrubbing parity) layers on top of the
+ * key-based deny-list above. It scans string VALUES for PII that leaks into
+ * free text (credit-card numbers, SSNs, emails, IPs) and is applied only when
+ * the caller opts in via {@link RedactOptions.scrubValues}. The layering is:
+ *
+ *   A) ALWAYS scrub (regardless of sendDefaultPii) — high-risk financial /
+ *      identity data never legitimately wanted in telemetry:
+ *        • Luhn-valid credit-card numbers (13–19 digits, space/hyphen seps).
+ *        • US SSN in dashed form `\d{3}-\d{2}-\d{4}`.
+ *   B) Scrub UNLESS sendDefaultPii === true:
+ *        • Email addresses.
+ *        • IPv4 addresses (octets validated 0–255). IPv6 best-effort.
+ *
+ * Conservative by design: a digit run that FAILS the Luhn checksum is left
+ * intact (so order ids / timestamps are not nuked), and bare 9-digit numbers
+ * are NOT treated as SSNs (the hyphens are required).
  */
 
 export const REDACTED = '[REDACTED]';
@@ -76,7 +93,118 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export interface RedactOptions {
+// ─── Value-pattern PII scrubbing (Sentry data-scrubbing parity) ──────────────
+//
+// Compiled once at module load. These run on the wire path, so they must be
+// cheap and never throw. We cap the per-string length we scan to keep a
+// hostile/huge string from turning the regex engine into a hot loop.
+
+/** Max chars we scan in a single string value. Longer strings are passed through. */
+const MAX_SCAN_LEN = 16_384;
+
+/**
+ * Candidate credit-card run: 13–19 digits with optional single space/hyphen
+ * separators between groups. Bounded by non-digit edges so we don't bite into
+ * a longer number. Luhn-validated below before redacting — a run that fails
+ * Luhn is preserved (avoids nuking order ids / timestamps / long counters).
+ */
+const CC_CANDIDATE = /(?<![\d])(?:\d[ -]?){12,18}\d(?![\d])/g;
+
+/** US SSN — REQUIRE the dashes. Bare 9-digit numbers are intentionally NOT matched. */
+const SSN = /\b\d{3}-\d{2}-\d{4}\b/g;
+
+/** Standard email. Conservative local/domain charset; requires a dotted TLD. */
+const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+
+/** IPv4 with every octet validated to 0–255 (avoids matching e.g. `999.1.1.1`). */
+const IPV4 =
+  /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g;
+
+/** IPv6 — best-effort. Matches full + common compressed forms. */
+const IPV6 =
+  /\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z]+)?\b|\b::(?:[0-9A-Fa-f]{1,4}:){0,6}[0-9A-Fa-f]{1,4}\b/g;
+
+/** Luhn checksum — true only for a genuine card-number candidate. */
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let alt = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48; // '0' === 48
+    if (d < 0 || d > 9) return false;
+    if (alt) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+
+/**
+ * Apply the always-on (A) value scrubbers to a single string: Luhn-valid
+ * credit cards + dashed SSNs. Returns the (possibly) scrubbed string. Never
+ * throws — on any internal error the original string is returned unchanged.
+ */
+function scrubAlwaysPii(value: string): string {
+  try {
+    let out = value.replace(CC_CANDIDATE, (match) => {
+      const digits = match.replace(/[ -]/g, '');
+      if (digits.length < 13 || digits.length > 19) return match; // length re-check
+      return passesLuhn(digits) ? REDACTED : match;
+    });
+    out = out.replace(SSN, REDACTED);
+    return out;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Apply the sendDefaultPii-gated (B) value scrubbers: email + IP addresses.
+ * Only invoked when sendDefaultPii is false. Never throws.
+ */
+function scrubDefaultPii(value: string): string {
+  try {
+    let out = value.replace(EMAIL, REDACTED);
+    out = out.replace(IPV4, REDACTED);
+    out = out.replace(IPV6, REDACTED);
+    return out;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Scrub a single string value according to the active layering. `scrubValues`
+ * false → no-op (key-based redaction only). `sendDefaultPii` true disables the
+ * (B) email/IP scrubbers; the (A) financial/identity scrubbers are always on.
+ * Very large strings are skipped (returned unchanged) for performance.
+ */
+export function scrubStringValue(value: string, opts: ValueScrubOptions): string {
+  if (!opts.scrubValues) return value;
+  if (value.length === 0 || value.length > MAX_SCAN_LEN) return value;
+  let out = scrubAlwaysPii(value);
+  if (!opts.sendDefaultPii) out = scrubDefaultPii(out);
+  return out;
+}
+
+export interface ValueScrubOptions {
+  /**
+   * Turn on value-pattern scrubbing of string VALUES (CC/SSN always, email/IP
+   * unless sendDefaultPii). Off by default so the primitive stays a pure
+   * key-based redactor unless a caller opts in.
+   */
+  scrubValues?: boolean;
+  /**
+   * When true, the email/IP value scrubbers are disabled (the user opted into
+   * PII). The Luhn-CC + SSN scrubbers stay on regardless. Default false
+   * (Sentry parity). Ignored unless {@link scrubValues} is true.
+   */
+  sendDefaultPii?: boolean;
+}
+
+export interface RedactOptions extends ValueScrubOptions {
   /** Extra key patterns added to the built-in deny-list (string or RegExp). */
   extraKeys?: (string | RegExp)[];
   /** Hard recursion ceiling. Default 12. */
@@ -92,26 +220,40 @@ export function redactObject<T extends Record<string, unknown>>(
   options: RedactOptions = {},
 ): T | undefined {
   if (input == null) return input;
-  const extra = compileExtraPatterns(options.extraKeys);
-  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
-  const seen = new WeakMap<object, unknown>();
-  return walk(input, extra, 0, maxDepth, seen) as T;
+  try {
+    const extra = compileExtraPatterns(options.extraKeys);
+    const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const seen = new WeakMap<object, unknown>();
+    return walk(input, extra, 0, maxDepth, seen, options) as T;
+  } catch {
+    // Fail-open: a scrubber bug must never break/drop an event. The key-based
+    // header/body redactors elsewhere already removed the highest-risk
+    // secrets; returning the input here preserves that guarantee.
+    return input;
+  }
 }
 
 /**
  * Same shape but for a value of unknown type (typed entry point used by
- * the SDK when serialising free-form contexts).
+ * the SDK when serialising free-form contexts). When value scrubbing is on,
+ * scalar string inputs are scrubbed too.
  */
 export function redactValue(
   input: unknown,
   options: RedactOptions = {},
 ): unknown {
   if (input == null) return input;
-  if (typeof input !== 'object') return input;
-  const extra = compileExtraPatterns(options.extraKeys);
-  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
-  const seen = new WeakMap<object, unknown>();
-  return walk(input, extra, 0, maxDepth, seen);
+  if (typeof input !== 'object') {
+    return typeof input === 'string' ? scrubStringValue(input, options) : input;
+  }
+  try {
+    const extra = compileExtraPatterns(options.extraKeys);
+    const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
+    const seen = new WeakMap<object, unknown>();
+    return walk(input, extra, 0, maxDepth, seen, options);
+  } catch {
+    return input; // fail-open
+  }
 }
 
 function walk(
@@ -120,9 +262,11 @@ function walk(
   depth: number,
   maxDepth: number,
   seen: WeakMap<object, unknown>,
+  valueOpts: ValueScrubOptions,
 ): unknown {
   if (node == null) return node;
   const t = typeof node;
+  if (t === 'string') return scrubStringValue(node as string, valueOpts);
   if (t !== 'object') return node;
   if (depth >= maxDepth) return '[MaxDepth]';
 
@@ -133,7 +277,7 @@ function walk(
     const out: unknown[] = new Array(node.length);
     seen.set(asObj, out);
     for (let i = 0; i < node.length; i++) {
-      out[i] = walk(node[i], extra, depth + 1, maxDepth, seen);
+      out[i] = walk(node[i], extra, depth + 1, maxDepth, seen, valueOpts);
     }
     return out;
   }
@@ -153,7 +297,7 @@ function walk(
       out[k] = REDACTED;
       continue;
     }
-    out[k] = walk(v, extra, depth + 1, maxDepth, seen);
+    out[k] = walk(v, extra, depth + 1, maxDepth, seen, valueOpts);
   }
   return out;
 }
@@ -177,4 +321,4 @@ export function redactHeaderRecord(
 }
 
 /** Test/internal-only hooks. Not exported via the package root. */
-export const __test = { DEFAULT_REDACTED_KEY_PATTERNS };
+export const __test = { DEFAULT_REDACTED_KEY_PATTERNS, passesLuhn, scrubAlwaysPii, scrubDefaultPii };
