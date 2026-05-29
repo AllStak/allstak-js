@@ -5,6 +5,59 @@ All notable changes to `@allstak/js` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Release-health session tracking.** A `Session` / `SessionTracker`
+  (`src/session.ts`) opens one release-health session per process/app-launch
+  and reports lifecycle to `/ingest/v1/sessions/start` and
+  `/ingest/v1/sessions/end`. Status vocabulary matches the backend contract and
+  the Java SDK (`ok` → `errored` → `crashed`/`abnormal`), enabling crash-free
+  session/user rates. Sessions are best-effort live-only and are never
+  persisted to the offline queue.
+- **Offline / persistent transport queue** (`src/transport/offline-queue.ts`).
+  Events that cannot be delivered (network error, retries exhausted, circuit
+  open/offline, or shutdown with buffered events) are written to a persistent
+  store instead of being dropped, then drained on the next init. Payloads are
+  persisted post-redaction — only the exact PII-scrubbed bytes the transport
+  would have sent are stored. Session start/end calls are excluded.
+- **Value-pattern PII scrubbing + `sendDefaultPii`** (`src/utils/redact.ts`,
+  `config.sendDefaultPii`). In addition to the existing key-based deny-list,
+  values are now pattern-scrubbed: credit-card and SSN patterns are **always**
+  scrubbed regardless of configuration; email addresses and IP addresses are
+  scrubbed **unless** `sendDefaultPii: true` is set. Applied across logs,
+  errors, and breadcrumbs.
+- **Core Web Vitals collection (browser)** (`src/modules/web-vitals.ts`). LCP,
+  CLS, INP, FCP, and TTFB are observed natively (no `web-vitals` dependency)
+  and reported as a single `op: 'web.vital'` span to `/ingest/v1/spans`,
+  surfacing in the dashboard's web-vitals view.
+- **Outbound Node HTTP trace-context propagation** (`src/modules/auto-node-http.ts`).
+  `http.request` / `https.request` calls are auto-instrumented to inject W3C
+  trace context, continuing the distributed trace across outbound service calls.
+- **Head-of-trace sampling: `tracesSampleRate` + `tracesSampler`**
+  (`config.tracesSampleRate`, `config.tracesSampler`). The sampling decision is
+  made once at the head of a trace (W3C sticky head-of-trace) and propagated, so
+  a `tracesSampler` can honor `parentSampled`. Back-compat default: when neither
+  is set, every trace is sampled (tracing stays fully on).
+- **Runtime release auto-detection + auto-registration**
+  (`src/release-detect.ts`, `src/release-registration.ts`). Node-only, guarded
+  local-git probe at init resolves `release` (after `ALLSTAK_RELEASE` and other
+  env vars) and can auto-register the detected runtime release, so a non-empty
+  release is associated with events without a CI/CD step.
+
+### Changed
+
+- Transport now honors a real `Retry-After` header on `429`/`503` responses,
+  overriding the computed exponential backoff for the circuit breaker
+  (`src/transport/http.ts`).
+- Removed hardcoded example API keys from the repo.
+
+### Docs
+
+- Quickstart no longer includes host setup; SDK contribution readiness docs
+  improved.
+
 ## [0.2.3] — 2026-05-18
 
 ### Security (CRITICAL)

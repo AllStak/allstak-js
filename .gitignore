@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 .env
 coverage/
+
+# npm pack artifacts (dist/ is intentionally tracked; tarballs are not)
+*.tgz
