@@ -1,14 +1,10 @@
-import { createRequire as __allstakCreateRequire } from 'node:module';
-const require = __allstakCreateRequire(import.meta.url);
 import {
+  __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-2Z2PH3DC.mjs";
-import {
-  __require
-} from "./chunk-6GVGKK5H.mjs";
+} from "./chunk-KENGFPTD.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -290,7 +286,7 @@ function detectGlobalAsyncStorage() {
 }
 function isNodeRuntime() {
   try {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined" || typeof process !== "undefined" && !!process.versions?.node && typeof window === "undefined";
   } catch {
     return false;
   }
@@ -2137,7 +2133,7 @@ var TracingModule = class {
 };
 function createAsyncTraceStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -2465,7 +2461,7 @@ function registerRuntimeRelease(options) {
 }
 function isTestRuntime() {
   try {
-    return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+    return process.env.VITEST === "true";
   } catch {
     return false;
   }
@@ -2512,7 +2508,7 @@ var Session = class {
 function isTestRuntime2() {
   try {
     if (typeof process !== "undefined" && process.env) {
-      return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+      return process.env.VITEST === "true";
     }
   } catch {
   }
@@ -3475,7 +3471,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "0.2.4";
+var SDK_VERSION = "0.3.0";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
@@ -3634,7 +3630,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
   }
   isNodeRuntime() {
     return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
@@ -4224,7 +4220,7 @@ var AllStakClient = class {
 };
 function createAsyncScopeStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -4459,8 +4455,9 @@ export {
   isNodeRuntime2 as isNodeRuntime,
   detectGitRelease,
   Scope,
+  SDK_VERSION,
   applyReleaseAutodetect,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-EW3J2MD2.mjs.map
+//# sourceMappingURL=chunk-EAZ2N4NX.mjs.map

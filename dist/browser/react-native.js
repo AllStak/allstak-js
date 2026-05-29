@@ -3916,7 +3916,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "0.2.4";
+var SDK_VERSION = "0.3.0";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
