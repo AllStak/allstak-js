@@ -160,7 +160,7 @@ export function installReactNative(options: ReactNativeInstallOptions = {}): voi
   AllStak.setTag('platform', 'react-native');
 
   // Phase 3 — SDK identity + auto-detected dist. The resulting wire
-  // payload will land in ClickHouse with sdk_name=allstak-react-native
+  // payload reaches the AllStak ingest API with sdk_name=allstak-react-native
   // and dist=ios-hermes / android-hermes (or -jsc for the legacy engine).
   try {
     const hermes = typeof (globalThis as { HermesInternal?: unknown }).HermesInternal !== 'undefined';

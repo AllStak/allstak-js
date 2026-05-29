@@ -4,7 +4,7 @@ import { generateId } from './utils/uuid';
 
 /**
  * Lifecycle status of a release-health session. Vocabulary matches the AllStak
- * backend's `/ingest/v1/sessions/end` contract and Sentry's release-health
+ * backend's `/ingest/v1/sessions/end` contract and the SDK's release-health
  * conventions, and mirrors the Java SDK's {@code SessionStatus}:
  *
  * - `ok`       — session ended normally with at most non-fatal logs.
@@ -19,6 +19,42 @@ export type SessionStatus = 'ok' | 'errored' | 'crashed' | 'abnormal';
 
 const PATH_START = '/ingest/v1/sessions/start';
 const PATH_END = '/ingest/v1/sessions/end';
+const SESSION_STATE_VERSION = 1;
+const SESSION_STATE_PREFIX = 'allstak.session.v1';
+const SESSION_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const SESSION_RECOVERY_LOCK_MS = 30_000;
+const SESSION_RECOVERY_MAX_ATTEMPTS = 3;
+
+export interface SessionStateStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+interface PersistedSessionState {
+  version: 1;
+  sessionId: string;
+  startedAt: number;
+  updatedAt: number;
+  status: SessionStatus;
+  release?: string;
+  environment?: string;
+  userId?: string;
+  sdkName?: string;
+  sdkVersion?: string;
+  platform?: string;
+  closed?: boolean;
+  endedAt?: number;
+  recoveryAttempts?: number;
+  recoveryLockOwner?: string;
+  recoveryLockUntil?: number;
+  recoveredAt?: number;
+}
+
+export interface SessionTrackerOptions {
+  storage?: SessionStateStorage | null;
+  storageKey?: string;
+}
 
 /**
  * A single release-health session — one per process / app-launch in the default
@@ -76,8 +112,16 @@ export class Session {
 export function isTestRuntime(): boolean {
   try {
     if (typeof process !== 'undefined' && process.env) {
-      return process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
+      return process.env.NODE_ENV === 'test'
+        || process.env.VITEST === 'true'
+        || process.env.VITEST_WORKER_ID != null
+        || process.env.VITEST_POOL_ID != null;
     }
+  } catch {
+    /* ignore */
+  }
+  try {
+    if ((globalThis as any).__vitest_worker__ != null) return true;
   } catch {
     /* ignore */
   }
@@ -102,12 +146,20 @@ export class SessionTracker {
   private active: Session | null = null;
   private ended = false;
   private cleanup: Array<() => void> = [];
+  private readonly storage: SessionStateStorage | null;
+  private readonly storageKey: string;
 
   constructor(
     private config: AllStakConfig,
     private transport: HttpTransport,
     private sessionId: string,
-  ) {}
+    options: SessionTrackerOptions = {},
+  ) {
+    this.storageKey = options.storageKey ?? sessionStorageKey(config);
+    this.storage = options.storage === undefined
+      ? defaultSessionStateStorage()
+      : options.storage;
+  }
 
   /**
    * Idempotent. Reuses the client's existing session id, sends `/sessions/start`,
@@ -116,11 +168,26 @@ export class SessionTracker {
    */
   start(): Session {
     if (this.active) return this.active;
+    this.recoverPreviousSession();
     const session = new Session(this.sessionId);
     this.active = session;
 
     try {
       const release = this.resolveRelease();
+      this.writeState({
+        version: SESSION_STATE_VERSION,
+        sessionId: session.id,
+        startedAt: session.startedAt,
+        updatedAt: Date.now(),
+        status: session.status,
+        release,
+        environment: this.config.environment,
+        userId: this.config.user?.id,
+        sdkName: this.config.sdkName,
+        sdkVersion: this.config.sdkVersion,
+        platform: this.config.platform,
+        closed: false,
+      });
       if (release) {
         const payload: Record<string, unknown> = {
           sessionId: session.id,
@@ -148,12 +215,16 @@ export class SessionTracker {
 
   /** Record a HANDLED error against the active session. No I/O. */
   recordError(): void {
-    this.current()?.recordError();
+    const session = this.current();
+    session?.recordError();
+    if (session) this.updateOpenState(session);
   }
 
   /** Record an UNHANDLED/fatal crash. No I/O — the end POST carries the status. */
   recordCrash(): void {
-    this.current()?.recordCrash();
+    const session = this.current();
+    session?.recordCrash();
+    if (session) this.updateOpenState(session);
   }
 
   /**
@@ -174,6 +245,21 @@ export class SessionTracker {
 
     try {
       const status = finalStatus ?? session.status;
+      this.writeState({
+        version: SESSION_STATE_VERSION,
+        sessionId: session.id,
+        startedAt: session.startedAt,
+        updatedAt: Date.now(),
+        status,
+        release: this.resolveRelease(),
+        environment: this.config.environment,
+        userId: this.config.user?.id,
+        sdkName: this.config.sdkName,
+        sdkVersion: this.config.sdkVersion,
+        platform: this.config.platform,
+        closed: true,
+        endedAt: Date.now(),
+      });
       const release = this.resolveRelease();
       if (!release) return;
       const payload: Record<string, unknown> = {
@@ -196,6 +282,109 @@ export class SessionTracker {
     if (release) return release;
     const sdkVersion = this.config.sdkVersion?.trim();
     return sdkVersion || undefined;
+  }
+
+  private recoverPreviousSession(): void {
+    const previous = this.readState();
+    if (!previous) return;
+
+    const now = Date.now();
+    if (previous.closed) {
+      this.removeState();
+      return;
+    }
+    if (now - previous.startedAt > SESSION_STATE_MAX_AGE_MS) {
+      this.removeState();
+      return;
+    }
+    if ((previous.recoveryAttempts ?? 0) >= SESSION_RECOVERY_MAX_ATTEMPTS) {
+      this.removeState();
+      return;
+    }
+    if (previous.recoveryLockUntil && previous.recoveryLockUntil > now) {
+      return;
+    }
+
+    const owner = generateId();
+    const locked: PersistedSessionState = {
+      ...previous,
+      recoveryAttempts: (previous.recoveryAttempts ?? 0) + 1,
+      recoveryLockOwner: owner,
+      recoveryLockUntil: now + SESSION_RECOVERY_LOCK_MS,
+      updatedAt: now,
+    };
+    this.writeState(locked);
+    const claimed = this.readState();
+    if (!claimed || claimed.recoveryLockOwner !== owner) return;
+
+    const status: SessionStatus = previous.status === 'crashed' ? 'crashed' : 'abnormal';
+    const endedAt = previous.updatedAt || now;
+    try {
+      this.transport.send(PATH_END, {
+        sessionId: previous.sessionId,
+        durationMs: Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, endedAt - previous.startedAt)),
+        status,
+      });
+      this.writeState({
+        ...locked,
+        status,
+        closed: true,
+        endedAt: now,
+        recoveredAt: now,
+        recoveryLockUntil: undefined,
+      });
+    } catch {
+      this.writeState({
+        ...locked,
+        recoveryLockUntil: 0,
+      });
+    }
+  }
+
+  private updateOpenState(session: Session): void {
+    const current = this.readState();
+    if (!current || current.sessionId !== session.id || current.closed) return;
+    this.writeState({
+      ...current,
+      status: session.status,
+      updatedAt: Date.now(),
+      userId: this.config.user?.id,
+    });
+  }
+
+  private readState(): PersistedSessionState | null {
+    if (!this.storage) return null;
+    try {
+      const raw = this.storage.getItem(this.storageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!isPersistedSessionState(parsed)) {
+        this.removeState();
+        return null;
+      }
+      return parsed;
+    } catch {
+      this.removeState();
+      return null;
+    }
+  }
+
+  private writeState(state: PersistedSessionState): void {
+    if (!this.storage) return;
+    try {
+      this.storage.setItem(this.storageKey, JSON.stringify(state));
+    } catch {
+      /* fail-open: session recovery state must never break the app */
+    }
+  }
+
+  private removeState(): void {
+    if (!this.storage) return;
+    try {
+      this.storage.removeItem(this.storageKey);
+    } catch {
+      /* ignore */
+    }
   }
 
   // ── Graceful-shutdown hooks ───────────────────────────────────────────────
@@ -245,3 +434,118 @@ export class SessionTracker {
     this.cleanup = [];
   }
 }
+
+function isPersistedSessionState(value: unknown): value is PersistedSessionState {
+  if (!value || typeof value !== 'object') return false;
+  const s = value as Partial<PersistedSessionState>;
+  return (
+    s.version === SESSION_STATE_VERSION &&
+    typeof s.sessionId === 'string' &&
+    s.sessionId.length > 0 &&
+    typeof s.startedAt === 'number' &&
+    Number.isFinite(s.startedAt) &&
+    typeof s.updatedAt === 'number' &&
+    Number.isFinite(s.updatedAt) &&
+    (s.status === 'ok' || s.status === 'errored' || s.status === 'crashed' || s.status === 'abnormal')
+  );
+}
+
+function sessionStorageKey(config: AllStakConfig): string {
+  return `${SESSION_STATE_PREFIX}.${stableHash([
+    config.host ?? '',
+    config.apiKey ?? '',
+    config.release ?? '',
+    config.sdkName ?? '',
+  ].join('|'))}`;
+}
+
+function stableHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function defaultSessionStateStorage(): SessionStateStorage | null {
+  return browserSessionStateStorage() ?? nodeSessionStateStorage();
+}
+
+function browserSessionStateStorage(): SessionStateStorage | null {
+  try {
+    const storage = typeof window !== 'undefined' ? window.localStorage : undefined;
+    if (!storage) return null;
+    const probe = '__allstak_session_probe__';
+    storage.setItem(probe, '1');
+    storage.removeItem(probe);
+    return storage;
+  } catch {
+    return null;
+  }
+}
+
+interface NodeFsLike {
+  mkdirSync(path: string, opts: { recursive: boolean }): void;
+  readFileSync(path: string, enc: 'utf8'): string;
+  writeFileSync(path: string, data: string): void;
+  unlinkSync(path: string): void;
+  existsSync(path: string): boolean;
+}
+
+class FileSessionStateStorage implements SessionStateStorage {
+  constructor(private fs: NodeFsLike, private dir: string) {
+    this.fs.mkdirSync(this.dir, { recursive: true });
+  }
+
+  getItem(key: string): string | null {
+    try {
+      const file = this.fileFor(key);
+      return this.fs.existsSync(file) ? this.fs.readFileSync(file, 'utf8') : null;
+    } catch {
+      return null;
+    }
+  }
+
+  setItem(key: string, value: string): void {
+    try {
+      this.fs.mkdirSync(this.dir, { recursive: true });
+      this.fs.writeFileSync(this.fileFor(key), value);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  removeItem(key: string): void {
+    try {
+      const file = this.fileFor(key);
+      if (this.fs.existsSync(file)) this.fs.unlinkSync(file);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private fileFor(key: string): string {
+    return `${this.dir}/${key.replace(/[^a-zA-Z0-9._-]/g, '_')}.json`;
+  }
+}
+
+function nodeSessionStateStorage(): SessionStateStorage | null {
+  try {
+    if (typeof process === 'undefined' || !process.versions?.node || typeof window !== 'undefined') {
+      return null;
+    }
+    const proc = (globalThis as any).process;
+    const fs = proc?.getBuiltinModule?.('node:fs') ??
+      (typeof require === 'function' ? require('node:fs') : null);
+    const os = proc?.getBuiltinModule?.('node:os') ??
+      (typeof require === 'function' ? require('node:os') : null);
+    if (!fs) return null;
+    const tmp = os?.tmpdir?.() ?? '/tmp';
+    return new FileSessionStateStorage(fs as NodeFsLike, `${String(tmp).replace(/\/$/, '')}/allstak-session-state`);
+  } catch {
+    return null;
+  }
+}
+
+declare const require: undefined | ((id: string) => any);

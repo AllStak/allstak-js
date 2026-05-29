@@ -16,7 +16,7 @@
  *   4. Detect cycles and short-circuit to '[Circular]' rather than throwing.
  *   5. Hard-cap recursion depth so a hostile input can't crash the SDK.
  *
- * VALUE-PATTERN scrubbing (Sentry data-scrubbing parity) layers on top of the
+ * VALUE-PATTERN scrubbing (value-pattern data-scrubbing) layers on top of the
  * key-based deny-list above. It scans string VALUES for PII that leaks into
  * free text (credit-card numbers, SSNs, emails, IPs) and is applied only when
  * the caller opts in via {@link RedactOptions.scrubValues}. The layering is:
@@ -93,7 +93,7 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// ─── Value-pattern PII scrubbing (Sentry data-scrubbing parity) ──────────────
+// ─── Value-pattern PII scrubbing (value-pattern data-scrubbing) ──────────────
 //
 // Compiled once at module load. These run on the wire path, so they must be
 // cheap and never throw. We cap the per-string length we scan to keep a
@@ -123,6 +123,12 @@ const IPV4 =
 /** IPv6 — best-effort. Matches full + common compressed forms. */
 const IPV6 =
   /\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z]+)?\b|\b::(?:[0-9A-Fa-f]{1,4}:){0,6}[0-9A-Fa-f]{1,4}\b/g;
+
+/** Bearer-style auth token in free text. */
+const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
+
+/** Compact JWT-like token in free text. */
+const JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 
 /** Luhn checksum — true only for a genuine card-number candidate. */
 function passesLuhn(digits: string): boolean {
@@ -154,6 +160,8 @@ function scrubAlwaysPii(value: string): string {
       return passesLuhn(digits) ? REDACTED : match;
     });
     out = out.replace(SSN, REDACTED);
+    out = out.replace(BEARER_VALUE, REDACTED);
+    out = out.replace(JWT_VALUE, REDACTED);
     return out;
   } catch {
     return value;
@@ -198,8 +206,8 @@ export interface ValueScrubOptions {
   scrubValues?: boolean;
   /**
    * When true, the email/IP value scrubbers are disabled (the user opted into
-   * PII). The Luhn-CC + SSN scrubbers stay on regardless. Default false
-   * (Sentry parity). Ignored unless {@link scrubValues} is true.
+   * PII). The Luhn-CC + SSN scrubbers stay on regardless. Default false.
+   * Ignored unless {@link scrubValues} is true.
    */
   sendDefaultPii?: boolean;
 }

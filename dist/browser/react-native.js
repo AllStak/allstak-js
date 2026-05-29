@@ -423,16 +423,25 @@ var HttpTransport = class {
     this.dropped = 0;
     this.persisted = 0;
     this.replayed = 0;
+    this.retryTimer = null;
+    this.retryTimerDueAt = 0;
+    this.pendingRetryDelayMs = 0;
+    this.closed = false;
     this.offlineQueue = offlineQueue ?? new NoopOfflineQueue();
     this.offlineEnabled = !!offlineQueue && !(offlineQueue instanceof NoopOfflineQueue);
   }
   send(path, payload) {
+    if (this.closed && !isPersistablePath(path)) {
+      return Promise.resolve();
+    }
     this.enqueueOrDispatch({ path, payload });
     return Promise.resolve();
   }
   enqueueOrDispatch(item) {
     if (Date.now() < this.circuitOpenUntil) {
+      this.persistOne(item, false);
       this.bufferOrPersist(item);
+      this.scheduleFlush();
       return;
     }
     this.track(this.dispatch(item));
@@ -445,6 +454,10 @@ var HttpTransport = class {
    * are never persisted. Fully fail-open.
    */
   bufferOrPersist(item) {
+    if (this.closed) {
+      this.persistOne(item);
+      return;
+    }
     const evicted = this.buffer.pushReturningEvicted(item);
     if (evicted) this.persistOne(evicted);
   }
@@ -456,7 +469,7 @@ var HttpTransport = class {
     try {
       await this.doFetch(`${this.baseUrl}${item.path}`, item.payload);
       this.onSendSuccess(item);
-      this.scheduleFlush();
+      if (!this.closed) this.scheduleFlush();
     } catch (err) {
       this.onSendFailure(item, err);
     }
@@ -481,7 +494,7 @@ var HttpTransport = class {
    */
   onSendFailure(item, err) {
     this.failed++;
-    this.recordFailure(err);
+    const retryDelay = this.recordFailure(err);
     if (isPermanentFailure(err)) {
       this.dropped++;
       if (item.persistId) {
@@ -492,7 +505,13 @@ var HttpTransport = class {
       }
       return;
     }
+    if (this.closed) {
+      this.persistOne(item);
+      return;
+    }
+    this.persistOne(item, false);
     this.bufferOrPersist(item);
+    this.scheduleFlush(retryDelay);
   }
   async doFetch(url, payload) {
     const controller = new AbortController();
@@ -518,22 +537,37 @@ var HttpTransport = class {
       this.lastTransportLatencyMs = Date.now() - started;
     }
   }
-  scheduleFlush() {
-    if (this.buffer.size === 0 || this.flushing) return;
-    const delay = Math.max(0, this.circuitOpenUntil - Date.now());
+  scheduleFlush(delayMs = 0) {
+    if (this.closed) return;
+    if (this.buffer.size === 0) return;
+    if (this.flushing) {
+      this.pendingRetryDelayMs = Math.max(this.pendingRetryDelayMs, delayMs);
+      return;
+    }
+    const delay = Math.max(delayMs, this.pendingRetryDelayMs, Math.max(0, this.circuitOpenUntil - Date.now()));
+    this.pendingRetryDelayMs = 0;
+    const dueAt = Date.now() + delay;
+    if (this.retryTimer && this.retryTimerDueAt <= dueAt) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimerDueAt = dueAt;
     const timer = setTimeout(() => {
+      this.retryTimer = null;
+      this.retryTimerDueAt = 0;
       void this.flushBuffer().catch(() => void 0);
     }, delay);
+    this.retryTimer = timer;
     if (typeof timer === "object" && typeof timer.unref === "function") timer.unref();
   }
   async flushBuffer() {
     if (this.flushing || this.buffer.size === 0) return;
+    if (this.closed) return;
     this.flushing = true;
     const started = Date.now();
     try {
       const items = this.buffer.drain();
       for (const item of items) {
         if (Date.now() < this.circuitOpenUntil) {
+          this.persistOne(item, false);
           this.bufferOrPersist(item);
           continue;
         }
@@ -553,10 +587,13 @@ var HttpTransport = class {
   }
   recordFailure(error) {
     this.consecutiveFailures++;
-    if (this.consecutiveFailures < FAILURE_THRESHOLD) return;
     const backoff = jitteredBackoff(this.consecutiveFailures);
     const retryAfterMs = retryAfterFromResponse(error);
-    this.circuitOpenUntil = Date.now() + (retryAfterMs > 0 ? retryAfterMs : backoff);
+    const delay = retryAfterMs > 0 ? retryAfterMs : backoff;
+    if (this.consecutiveFailures >= FAILURE_THRESHOLD) {
+      this.circuitOpenUntil = Date.now() + delay;
+    }
+    return delay;
   }
   getBufferSize() {
     return this.buffer.size;
@@ -607,6 +644,14 @@ var HttpTransport = class {
     }
     for (const item of items) this.persistOne(item);
   }
+  close() {
+    this.closed = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retryTimerDueAt = 0;
+    this.pendingRetryDelayMs = 0;
+    this.persistBufferedNow();
+  }
   /**
    * Drain the in-memory buffer and hand the items to the caller. Used by the
    * browser unload path so the client can attempt a `navigator.sendBeacon` for
@@ -623,17 +668,29 @@ var HttpTransport = class {
    * Persist a single already-scrubbed item to the offline store. Session
    * lifecycle paths are skipped (counted as a real drop). Fail-open.
    */
-  persistOne(item) {
+  persistOne(item, countDropOnSkip = true) {
+    if (item.persistId) {
+      if (this.offlineEnabled && isPersistablePath(item.path)) {
+        try {
+          this.offlineQueue.enqueue({ id: item.persistId, path: item.path, payload: item.payload, ts: Date.now() });
+          this.persisted++;
+        } catch {
+          if (countDropOnSkip) this.dropped++;
+        }
+      }
+      return;
+    }
     if (!this.offlineEnabled || !isPersistablePath(item.path)) {
-      this.dropped++;
+      if (countDropOnSkip) this.dropped++;
       return;
     }
     try {
       const id = item.persistId ?? nextPersistedId();
       this.offlineQueue.enqueue({ id, path: item.path, payload: item.payload, ts: Date.now() });
+      item.persistId = id;
       this.persisted++;
     } catch {
-      this.dropped++;
+      if (countDropOnSkip) this.dropped++;
     }
   }
   async flush(timeoutMs = 2e3) {
@@ -674,7 +731,7 @@ function isPermanentFailure(error) {
   return error.status >= 400 && error.status < 500 && error.status !== 429;
 }
 function jitteredBackoff(failures) {
-  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(8, failures - FAILURE_THRESHOLD));
+  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, Math.min(8, failures - 1)));
   return Math.floor(exp / 2 + Math.random() * (exp / 2));
 }
 function retryAfterFromResponse(error) {
@@ -861,6 +918,8 @@ var SSN = /\b\d{3}-\d{2}-\d{4}\b/g;
 var EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 var IPV4 = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g;
 var IPV6 = /\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[0-9A-Za-z]+)?\b|\b::(?:[0-9A-Fa-f]{1,4}:){0,6}[0-9A-Fa-f]{1,4}\b/g;
+var BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
+var JWT_VALUE = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 function passesLuhn(digits) {
   let sum = 0;
   let alt = false;
@@ -884,6 +943,8 @@ function scrubAlwaysPii(value) {
       return passesLuhn(digits) ? REDACTED : match;
     });
     out = out.replace(SSN, REDACTED);
+    out = out.replace(BEARER_VALUE, REDACTED);
+    out = out.replace(JWT_VALUE, REDACTED);
     return out;
   } catch {
     return value;
@@ -1262,7 +1323,7 @@ var ErrorModule = class {
     return out;
   }
   async sendThroughPipeline(payload) {
-    let final = payload;
+    let final = this.sanitizeForWire(payload);
     for (const processor of this.allEventProcessors()) {
       if (!final) return;
       try {
@@ -1279,7 +1340,39 @@ var ErrorModule = class {
       }
     }
     if (!final) return;
+    final = this.sanitizeForWire(final);
+    if (!final) return;
     this.transport.send(INGEST_PATH, final);
+  }
+  sanitizeForWire(payload) {
+    const extraKeys = this.config.redactKeys;
+    const scrub = this.valueScrubOptions();
+    const opts = { extraKeys, ...scrub };
+    const out = {
+      ...payload,
+      message: scrubStringValue(payload.message, scrub)
+    };
+    if (payload.metadata) out.metadata = redactObject(payload.metadata, opts) ?? payload.metadata;
+    if (payload.user) {
+      out.user = redactObject(
+        payload.user,
+        { ...opts, sendDefaultPii: true }
+      );
+    }
+    if (payload.requestContext) {
+      out.requestContext = redactObject(payload.requestContext, opts);
+    }
+    if (Array.isArray(payload.breadcrumbs)) {
+      out.breadcrumbs = payload.breadcrumbs.map((bc) => ({
+        ...bc,
+        message: scrubStringValue(bc.message, scrub),
+        ...bc.data ? { data: redactObject(bc.data, opts) ?? bc.data } : {}
+      }));
+    }
+    if (Array.isArray(payload.fingerprint)) {
+      out.fingerprint = payload.fingerprint.map((part) => scrubStringValue(String(part), scrub));
+    }
+    return out;
   }
   allEventProcessors() {
     const configured = this.config.eventProcessors ?? [];
@@ -2910,7 +3003,14 @@ function registerRuntimeRelease(options) {
 }
 function isTestRuntime() {
   try {
-    return process.env.VITEST === "true";
+    if (process.env.VITEST === "true" || process.env.VITEST_WORKER_ID != null || process.env.VITEST_POOL_ID != null) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  try {
+    return globalThis.__vitest_worker__ != null;
   } catch {
     return false;
   }
@@ -2919,6 +3019,11 @@ function isTestRuntime() {
 // src/session.ts
 var PATH_START = "/ingest/v1/sessions/start";
 var PATH_END = "/ingest/v1/sessions/end";
+var SESSION_STATE_VERSION = 1;
+var SESSION_STATE_PREFIX = "allstak.session.v1";
+var SESSION_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+var SESSION_RECOVERY_LOCK_MS = 3e4;
+var SESSION_RECOVERY_MAX_ATTEMPTS = 3;
 var Session = class {
   constructor(id = generateId(), startedAt = Date.now()) {
     this._status = "ok";
@@ -2954,20 +3059,26 @@ var Session = class {
 function isTestRuntime2() {
   try {
     if (typeof process !== "undefined" && process.env) {
-      return process.env.VITEST === "true";
+      return process.env.VITEST === "true" || process.env.VITEST_WORKER_ID != null || process.env.VITEST_POOL_ID != null;
     }
+  } catch {
+  }
+  try {
+    if (globalThis.__vitest_worker__ != null) return true;
   } catch {
   }
   return false;
 }
 var SessionTracker = class {
-  constructor(config, transport, sessionId) {
+  constructor(config, transport, sessionId, options = {}) {
     this.config = config;
     this.transport = transport;
     this.sessionId = sessionId;
     this.active = null;
     this.ended = false;
     this.cleanup = [];
+    this.storageKey = options.storageKey ?? sessionStorageKey(config);
+    this.storage = options.storage === void 0 ? defaultSessionStateStorage() : options.storage;
   }
   /**
    * Idempotent. Reuses the client's existing session id, sends `/sessions/start`,
@@ -2976,10 +3087,25 @@ var SessionTracker = class {
    */
   start() {
     if (this.active) return this.active;
+    this.recoverPreviousSession();
     const session = new Session(this.sessionId);
     this.active = session;
     try {
       const release = this.resolveRelease();
+      this.writeState({
+        version: SESSION_STATE_VERSION,
+        sessionId: session.id,
+        startedAt: session.startedAt,
+        updatedAt: Date.now(),
+        status: session.status,
+        release,
+        environment: this.config.environment,
+        userId: this.config.user?.id,
+        sdkName: this.config.sdkName,
+        sdkVersion: this.config.sdkVersion,
+        platform: this.config.platform,
+        closed: false
+      });
       if (release) {
         const payload = {
           sessionId: session.id,
@@ -3003,11 +3129,15 @@ var SessionTracker = class {
   }
   /** Record a HANDLED error against the active session. No I/O. */
   recordError() {
-    this.current()?.recordError();
+    const session = this.current();
+    session?.recordError();
+    if (session) this.updateOpenState(session);
   }
   /** Record an UNHANDLED/fatal crash. No I/O — the end POST carries the status. */
   recordCrash() {
-    this.current()?.recordCrash();
+    const session = this.current();
+    session?.recordCrash();
+    if (session) this.updateOpenState(session);
   }
   /**
    * Terminate the session and POST `/sessions/end`. Idempotent and best-effort.
@@ -3026,6 +3156,21 @@ var SessionTracker = class {
     this.removeShutdownHooks();
     try {
       const status = finalStatus ?? session.status;
+      this.writeState({
+        version: SESSION_STATE_VERSION,
+        sessionId: session.id,
+        startedAt: session.startedAt,
+        updatedAt: Date.now(),
+        status,
+        release: this.resolveRelease(),
+        environment: this.config.environment,
+        userId: this.config.user?.id,
+        sdkName: this.config.sdkName,
+        sdkVersion: this.config.sdkVersion,
+        platform: this.config.platform,
+        closed: true,
+        endedAt: Date.now()
+      });
       const release = this.resolveRelease();
       if (!release) return;
       const payload = {
@@ -3046,6 +3191,99 @@ var SessionTracker = class {
     if (release) return release;
     const sdkVersion = this.config.sdkVersion?.trim();
     return sdkVersion || void 0;
+  }
+  recoverPreviousSession() {
+    const previous = this.readState();
+    if (!previous) return;
+    const now = Date.now();
+    if (previous.closed) {
+      this.removeState();
+      return;
+    }
+    if (now - previous.startedAt > SESSION_STATE_MAX_AGE_MS) {
+      this.removeState();
+      return;
+    }
+    if ((previous.recoveryAttempts ?? 0) >= SESSION_RECOVERY_MAX_ATTEMPTS) {
+      this.removeState();
+      return;
+    }
+    if (previous.recoveryLockUntil && previous.recoveryLockUntil > now) {
+      return;
+    }
+    const owner = generateId();
+    const locked = {
+      ...previous,
+      recoveryAttempts: (previous.recoveryAttempts ?? 0) + 1,
+      recoveryLockOwner: owner,
+      recoveryLockUntil: now + SESSION_RECOVERY_LOCK_MS,
+      updatedAt: now
+    };
+    this.writeState(locked);
+    const claimed = this.readState();
+    if (!claimed || claimed.recoveryLockOwner !== owner) return;
+    const status = previous.status === "crashed" ? "crashed" : "abnormal";
+    const endedAt = previous.updatedAt || now;
+    try {
+      this.transport.send(PATH_END, {
+        sessionId: previous.sessionId,
+        durationMs: Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, endedAt - previous.startedAt)),
+        status
+      });
+      this.writeState({
+        ...locked,
+        status,
+        closed: true,
+        endedAt: now,
+        recoveredAt: now,
+        recoveryLockUntil: void 0
+      });
+    } catch {
+      this.writeState({
+        ...locked,
+        recoveryLockUntil: 0
+      });
+    }
+  }
+  updateOpenState(session) {
+    const current = this.readState();
+    if (!current || current.sessionId !== session.id || current.closed) return;
+    this.writeState({
+      ...current,
+      status: session.status,
+      updatedAt: Date.now(),
+      userId: this.config.user?.id
+    });
+  }
+  readState() {
+    if (!this.storage) return null;
+    try {
+      const raw = this.storage.getItem(this.storageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!isPersistedSessionState(parsed)) {
+        this.removeState();
+        return null;
+      }
+      return parsed;
+    } catch {
+      this.removeState();
+      return null;
+    }
+  }
+  writeState(state) {
+    if (!this.storage) return;
+    try {
+      this.storage.setItem(this.storageKey, JSON.stringify(state));
+    } catch {
+    }
+  }
+  removeState() {
+    if (!this.storage) return;
+    try {
+      this.storage.removeItem(this.storageKey);
+    } catch {
+    }
   }
   // ── Graceful-shutdown hooks ───────────────────────────────────────────────
   installShutdownHooks() {
@@ -3087,6 +3325,89 @@ var SessionTracker = class {
     this.cleanup = [];
   }
 };
+function isPersistedSessionState(value) {
+  if (!value || typeof value !== "object") return false;
+  const s = value;
+  return s.version === SESSION_STATE_VERSION && typeof s.sessionId === "string" && s.sessionId.length > 0 && typeof s.startedAt === "number" && Number.isFinite(s.startedAt) && typeof s.updatedAt === "number" && Number.isFinite(s.updatedAt) && (s.status === "ok" || s.status === "errored" || s.status === "crashed" || s.status === "abnormal");
+}
+function sessionStorageKey(config) {
+  return `${SESSION_STATE_PREFIX}.${stableHash([
+    config.host ?? "",
+    config.apiKey ?? "",
+    config.release ?? "",
+    config.sdkName ?? ""
+  ].join("|"))}`;
+}
+function stableHash(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+function defaultSessionStateStorage() {
+  return browserSessionStateStorage() ?? nodeSessionStateStorage();
+}
+function browserSessionStateStorage() {
+  try {
+    const storage = typeof window !== "undefined" ? window.localStorage : void 0;
+    if (!storage) return null;
+    const probe = "__allstak_session_probe__";
+    storage.setItem(probe, "1");
+    storage.removeItem(probe);
+    return storage;
+  } catch {
+    return null;
+  }
+}
+var FileSessionStateStorage = class {
+  constructor(fs, dir) {
+    this.fs = fs;
+    this.dir = dir;
+    this.fs.mkdirSync(this.dir, { recursive: true });
+  }
+  getItem(key) {
+    try {
+      const file = this.fileFor(key);
+      return this.fs.existsSync(file) ? this.fs.readFileSync(file, "utf8") : null;
+    } catch {
+      return null;
+    }
+  }
+  setItem(key, value) {
+    try {
+      this.fs.mkdirSync(this.dir, { recursive: true });
+      this.fs.writeFileSync(this.fileFor(key), value);
+    } catch {
+    }
+  }
+  removeItem(key) {
+    try {
+      const file = this.fileFor(key);
+      if (this.fs.existsSync(file)) this.fs.unlinkSync(file);
+    } catch {
+    }
+  }
+  fileFor(key) {
+    return `${this.dir}/${key.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`;
+  }
+};
+function nodeSessionStateStorage() {
+  try {
+    if (typeof process === "undefined" || !process.versions?.node || typeof window !== "undefined") {
+      return null;
+    }
+    const proc = globalThis.process;
+    const fs = proc?.getBuiltinModule?.("node:fs") ?? (typeof require === "function" ? require("fs") : null);
+    const os = proc?.getBuiltinModule?.("node:os") ?? (typeof require === "function" ? require("os") : null);
+    if (!fs) return null;
+    const tmp = os?.tmpdir?.() ?? "/tmp";
+    return new FileSessionStateStorage(fs, `${String(tmp).replace(/\/$/, "")}/allstak-session-state`);
+  } catch {
+    return null;
+  }
+}
 
 // src/integration.ts
 var installedOnce = /* @__PURE__ */ new Set();
@@ -3916,7 +4237,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "0.3.0";
+var SDK_VERSION = "0.3.1";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
@@ -4499,6 +4820,7 @@ var AllStakClient = class {
     this.sessionReplay?.destroy();
     this.uninstallNodeErrorHandlers();
     this.uninstallOfflineFlushHooks();
+    this.transport.close();
   }
   uninstallOfflineFlushHooks() {
     for (const fn of this.offlineFlushCleanup) {
@@ -4797,6 +5119,10 @@ var AllStak = {
    */
   flush(timeoutMs) {
     return ensureInit().flush(timeoutMs);
+  },
+  close() {
+    instance?.destroy();
+    instance = null;
   },
   /**
    * Run `callback` with a fresh, temporary {@link Scope} that isolates any

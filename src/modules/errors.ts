@@ -499,7 +499,7 @@ export class ErrorModule {
   }
 
   private async sendThroughPipeline(payload: ErrorIngestPayload): Promise<void> {
-    let final: ErrorIngestPayload | null | undefined = payload;
+    let final: ErrorIngestPayload | null | undefined = this.sanitizeForWire(payload);
 
     for (const processor of this.allEventProcessors()) {
       if (!final) return;
@@ -519,7 +519,40 @@ export class ErrorModule {
       catch { /* keep processed event */ }
     }
     if (!final) return;
+    final = this.sanitizeForWire(final);
+    if (!final) return;
     this.transport.send(INGEST_PATH, final);
+  }
+
+  private sanitizeForWire(payload: ErrorIngestPayload): ErrorIngestPayload {
+    const extraKeys = (this.config as any).redactKeys as (string | RegExp)[] | undefined;
+    const scrub = this.valueScrubOptions();
+    const opts = { extraKeys, ...scrub };
+    const out: ErrorIngestPayload = {
+      ...payload,
+      message: scrubStringValue(payload.message, scrub),
+    };
+    if (payload.metadata) out.metadata = redactObject(payload.metadata, opts) ?? payload.metadata;
+    if (payload.user) {
+      out.user = redactObject(
+        payload.user as Record<string, unknown>,
+        { ...opts, sendDefaultPii: true },
+      ) as ErrorIngestPayload['user'];
+    }
+    if (payload.requestContext) {
+      out.requestContext = redactObject(payload.requestContext as Record<string, unknown>, opts) as ErrorRequestContext;
+    }
+    if (Array.isArray(payload.breadcrumbs)) {
+      out.breadcrumbs = payload.breadcrumbs.map((bc) => ({
+        ...bc,
+        message: scrubStringValue(bc.message, scrub),
+        ...(bc.data ? { data: redactObject(bc.data, opts) ?? bc.data } : {}),
+      }));
+    }
+    if (Array.isArray(payload.fingerprint)) {
+      out.fingerprint = payload.fingerprint.map((part) => scrubStringValue(String(part), scrub));
+    }
+    return out;
   }
 
   private allEventProcessors(): ErrorEventProcessor[] {

@@ -210,7 +210,7 @@ async function runSyncJob() {
     slug: 'sync-analytics',
     status: 'success',
     durationMs: Date.now() - start,
-    message: 'Synced 15,432 events to ClickHouse',
+    message: 'Synced 15,432 events to the analytics store',
   });
   console.log('  ✓ heartbeat sent: sync-analytics (success)');
 }

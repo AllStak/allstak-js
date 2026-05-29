@@ -1,12 +1,12 @@
 /**
  * Persistent / offline event queue.
  *
- * Sentry persists un-sent envelopes to an offline store (a cache dir / IndexedDB)
- * and replays them on the next init. This module brings the AllStak JS SDK to
- * parity: when an event cannot be delivered (network error, retries exhausted,
- * circuit open / offline, or the app/process is shutting down with events still
- * buffered) the transport writes the payload to a persistent store instead of
- * dropping it, then drains the store on the next init.
+ * Un-sent envelopes are persisted to an offline store (a cache dir / IndexedDB)
+ * and replayed on the next init: when an event cannot be delivered (network
+ * error, retries exhausted, circuit open / offline, or the app/process is
+ * shutting down with events still buffered) the transport writes the payload to
+ * a persistent store instead of dropping it, then drains the store on the next
+ * init.
  *
  * Invariants (all enforced by {@link HttpTransport}, documented here for the
  * reader):
@@ -135,6 +135,10 @@ declare class HttpTransport {
     private lastFlushDurationMs;
     private persisted;
     private replayed;
+    private retryTimer;
+    private retryTimerDueAt;
+    private pendingRetryDelayMs;
+    private closed;
     /**
      * Persistent / offline store. Defaults to a no-op so existing callers and
      * tests keep their pure in-memory behavior; the client injects a real queue
@@ -190,6 +194,7 @@ declare class HttpTransport {
      * Session lifecycle paths are skipped. Fail-open.
      */
     persistBufferedNow(): void;
+    close(): void;
     /**
      * Drain the in-memory buffer and hand the items to the caller. Used by the
      * browser unload path so the client can attempt a `navigator.sendBeacon` for
@@ -200,7 +205,7 @@ declare class HttpTransport {
      * Persist a single already-scrubbed item to the offline store. Session
      * lifecycle paths are skipped (counted as a real drop). Fail-open.
      */
-    persistOne(item: Pending): void;
+    persistOne(item: Pending, countDropOnSkip?: boolean): void;
     flush(timeoutMs?: number): Promise<boolean>;
     noteDropped(count?: number): void;
     getStats(): TransportStats;

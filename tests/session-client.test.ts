@@ -16,11 +16,15 @@ function sessionStartCalls(fetchSpy: ReturnType<typeof vi.fn>) {
 describe('client session tracking wiring', () => {
   const prevVitest = process.env.VITEST;
   const prevNodeEnv = process.env.NODE_ENV;
+  const prevVitestWorker = process.env.VITEST_WORKER_ID;
+  const prevVitestPool = process.env.VITEST_POOL_ID;
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     delete process.env.VITEST;
     delete process.env.NODE_ENV;
+    delete process.env.VITEST_WORKER_ID;
+    delete process.env.VITEST_POOL_ID;
     fetchSpy = vi.fn().mockResolvedValue({ ok: true, headers: { get: () => null } });
     vi.stubGlobal('fetch', fetchSpy);
   });
@@ -32,6 +36,10 @@ describe('client session tracking wiring', () => {
     else process.env.VITEST = prevVitest;
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = prevNodeEnv;
+    if (prevVitestWorker === undefined) delete process.env.VITEST_WORKER_ID;
+    else process.env.VITEST_WORKER_ID = prevVitestWorker;
+    if (prevVitestPool === undefined) delete process.env.VITEST_POOL_ID;
+    else process.env.VITEST_POOL_ID = prevVitestPool;
   });
 
   it('posts /sessions/start on init by default', async () => {

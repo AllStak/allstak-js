@@ -121,11 +121,11 @@ Run via `node test-app/sdk-test.mjs` against live Docker stack.
 
 ---
 
-## Infrastructure Fix
+## Local Environment Fix
 
-**Issue found:** Backend container was connecting to Kafka's EXTERNAL listener (`kafka:9092`) which advertises itself as `localhost:9092`. From inside Docker, this resolves to the container's own loopback — not Kafka — causing all ingest endpoints to return 500.
+**Issue found:** The local backend container was connecting to the message broker's EXTERNAL listener, which advertises itself as `localhost`. From inside Docker, this resolves to the container's own loopback — not the broker — causing all ingest endpoints to return 500.
 
-**Fix:** Changed `KAFKA_BOOTSTRAP_SERVERS` from `kafka:9092` → `kafka:19092` (PLAINTEXT internal listener, advertised as `kafka:19092`). Updated `infra/docker/docker-compose.yml`.
+**Fix:** Pointed the local broker bootstrap at the internal listener port so the backend container can reach it within the Docker network.
 
 ---
 

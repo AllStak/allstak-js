@@ -32,7 +32,7 @@ import { detectGitRelease, GitRunner } from './release-detect';
 export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
-export const SDK_VERSION = '0.3.0';
+export const SDK_VERSION = '0.3.1';
 /** SDK package name. Sent on the wire as `sdk.name`. */
 export const SDK_NAME = 'allstak-js';
 
@@ -176,7 +176,7 @@ export interface AllStakConfig extends ReleaseMetadata {
   tags?: Record<string, string>;
   /**
    * Send personally-identifiable information that the SDK would otherwise
-   * scrub from free-text VALUES. Default `false` (Sentry parity).
+   * scrub from free-text VALUES. Default `false`.
    *
    * Layering (see {@link import('./utils/redact')}):
    *   - ALWAYS scrubbed regardless of this flag: Luhn-valid credit-card
@@ -186,7 +186,7 @@ export interface AllStakConfig extends ReleaseMetadata {
    *
    * This flag does NOT affect the EXPLICIT user object set via {@link user} /
    * `setUser()` — `user.id` / `user.email` are intentional identification and
-   * always ship as before, matching Sentry. It also does not affect key-based
+   * always ship as before. It also does not affect key-based
    * secret redaction (auth/cookie/token/etc.), which is always on.
    *
    * When `false`, any client IP the SDK auto-collects is dropped/masked; when
@@ -1061,6 +1061,7 @@ export class AllStakClient {
     this.sessionReplay?.destroy();
     this.uninstallNodeErrorHandlers();
     this.uninstallOfflineFlushHooks();
+    this.transport.close();
   }
 
   private uninstallOfflineFlushHooks(): void {

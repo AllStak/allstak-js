@@ -57,7 +57,17 @@ export function registerRuntimeRelease(options: RegisterRuntimeReleaseOptions): 
 
 function isTestRuntime(): boolean {
   try {
-    return process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
+    if (process.env.NODE_ENV === 'test'
+      || process.env.VITEST === 'true'
+      || process.env.VITEST_WORKER_ID != null
+      || process.env.VITEST_POOL_ID != null) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  try {
+    return (globalThis as any).__vitest_worker__ != null;
   } catch {
     return false;
   }

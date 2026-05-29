@@ -9,7 +9,7 @@ describe('Error Module', () => {
   beforeEach(() => {
     fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchSpy);
-    AllStak.init({ dsn: TEST_DSN, environment: 'test', release: '1.0.0' });
+    AllStak.init({ dsn: TEST_DSN, environment: 'test', release: '1.0.0', enableOfflineQueue: false });
   });
 
   afterEach(() => {

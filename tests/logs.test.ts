@@ -9,7 +9,7 @@ describe('Log Module', () => {
   beforeEach(() => {
     fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchSpy);
-    AllStak.init({ dsn: TEST_DSN, environment: 'test' });
+    AllStak.init({ dsn: TEST_DSN, environment: 'test', enableOfflineQueue: false });
   });
 
   afterEach(() => {
@@ -42,7 +42,7 @@ describe('Log Module', () => {
     // metadata may also include auto-injected traceId/spanId from the
     // log() wrapper, in addition to the caller's own meta keys.
     // The non-PII userId passes through; the free-text IPv4 value is scrubbed
-    // by default (Sentry data-scrubbing parity — sendDefaultPii defaults false).
+    // by default (value-pattern data-scrubbing — sendDefaultPii defaults false).
     expect(body.metadata).toMatchObject({ userId: '42', ip: '[REDACTED]' });
   });
 

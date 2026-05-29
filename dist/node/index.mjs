@@ -26,7 +26,7 @@ import {
   registerRuntimeRelease,
   setPersistence,
   src_default
-} from "./chunk-SDL6SIJC.mjs";
+} from "./chunk-DJU4MYVZ.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 export {

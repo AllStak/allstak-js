@@ -64,6 +64,10 @@ export class HttpTransport {
   private lastFlushDurationMs: number | undefined;
   private persisted = 0;
   private replayed = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimerDueAt = 0;
+  private pendingRetryDelayMs = 0;
+  private closed = false;
 
   /**
    * Persistent / offline store. Defaults to a no-op so existing callers and
@@ -85,13 +89,18 @@ export class HttpTransport {
   }
 
   send(path: string, payload: unknown): Promise<void> {
+    if (this.closed && !isPersistablePath(path)) {
+      return Promise.resolve();
+    }
     this.enqueueOrDispatch({ path, payload });
     return Promise.resolve();
   }
 
   private enqueueOrDispatch(item: Pending): void {
     if (Date.now() < this.circuitOpenUntil) {
+      this.persistOne(item, false);
       this.bufferOrPersist(item);
+      this.scheduleFlush();
       return;
     }
     this.track(this.dispatch(item));
@@ -105,6 +114,10 @@ export class HttpTransport {
    * are never persisted. Fully fail-open.
    */
   private bufferOrPersist(item: Pending): void {
+    if (this.closed) {
+      this.persistOne(item);
+      return;
+    }
     const evicted = this.buffer.pushReturningEvicted(item) as Pending | null;
     // The buffer is full — the OLDEST item was evicted to make room. Instead of
     // dropping it on the floor, persist it (already PII-scrubbed) so it survives
@@ -122,7 +135,7 @@ export class HttpTransport {
     try {
       await this.doFetch(`${this.baseUrl}${item.path}`, item.payload);
       this.onSendSuccess(item);
-      this.scheduleFlush();
+      if (!this.closed) this.scheduleFlush();
     } catch (err) {
       this.onSendFailure(item, err);
     }
@@ -150,7 +163,7 @@ export class HttpTransport {
    */
   private onSendFailure(item: Pending, err: unknown): void {
     this.failed++;
-    this.recordFailure(err);
+    const retryDelay = this.recordFailure(err);
     if (isPermanentFailure(err)) {
       this.dropped++;
       if (item.persistId) {
@@ -162,7 +175,16 @@ export class HttpTransport {
       }
       return;
     }
+    if (this.closed) {
+      this.persistOne(item);
+      return;
+    }
+    // Persist the failing item immediately when a real offline store exists.
+    // The in-memory buffer still retries it in this process, but the persisted
+    // copy protects against tab/process death before the next retry fires.
+    this.persistOne(item, false);
     this.bufferOrPersist(item);
+    this.scheduleFlush(retryDelay);
   }
 
   private async doFetch(url: string, payload: unknown): Promise<Response> {
@@ -191,17 +213,31 @@ export class HttpTransport {
     }
   }
 
-  private scheduleFlush(): void {
-    if (this.buffer.size === 0 || this.flushing) return;
-    const delay = Math.max(0, this.circuitOpenUntil - Date.now());
+  private scheduleFlush(delayMs = 0): void {
+    if (this.closed) return;
+    if (this.buffer.size === 0) return;
+    if (this.flushing) {
+      this.pendingRetryDelayMs = Math.max(this.pendingRetryDelayMs, delayMs);
+      return;
+    }
+    const delay = Math.max(delayMs, this.pendingRetryDelayMs, Math.max(0, this.circuitOpenUntil - Date.now()));
+    this.pendingRetryDelayMs = 0;
+    const dueAt = Date.now() + delay;
+    if (this.retryTimer && this.retryTimerDueAt <= dueAt) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimerDueAt = dueAt;
     const timer = setTimeout(() => {
+      this.retryTimer = null;
+      this.retryTimerDueAt = 0;
       void this.flushBuffer().catch(() => undefined);
     }, delay);
+    this.retryTimer = timer;
     if (typeof timer === 'object' && typeof timer.unref === 'function') timer.unref();
   }
 
   private async flushBuffer(): Promise<void> {
     if (this.flushing || this.buffer.size === 0) return;
+    if (this.closed) return;
     this.flushing = true;
     const started = Date.now();
 
@@ -209,6 +245,7 @@ export class HttpTransport {
       const items = this.buffer.drain() as Pending[];
       for (const item of items) {
         if (Date.now() < this.circuitOpenUntil) {
+          this.persistOne(item, false);
           this.bufferOrPersist(item);
           continue;
         }
@@ -228,14 +265,17 @@ export class HttpTransport {
     }
   }
 
-  private recordFailure(error: unknown): void {
+  private recordFailure(error: unknown): number {
     this.consecutiveFailures++;
-    if (this.consecutiveFailures < FAILURE_THRESHOLD) return;
     const backoff = jitteredBackoff(this.consecutiveFailures);
     // A real `Retry-After` from a 429/503 response overrides the computed
     // backoff; otherwise fall back to the jittered exponential backoff.
     const retryAfterMs = retryAfterFromResponse(error);
-    this.circuitOpenUntil = Date.now() + (retryAfterMs > 0 ? retryAfterMs : backoff);
+    const delay = retryAfterMs > 0 ? retryAfterMs : backoff;
+    if (this.consecutiveFailures >= FAILURE_THRESHOLD) {
+      this.circuitOpenUntil = Date.now() + delay;
+    }
+    return delay;
   }
 
   getBufferSize(): number {
@@ -294,6 +334,15 @@ export class HttpTransport {
     for (const item of items) this.persistOne(item);
   }
 
+  close(): void {
+    this.closed = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retryTimerDueAt = 0;
+    this.pendingRetryDelayMs = 0;
+    this.persistBufferedNow();
+  }
+
   /**
    * Drain the in-memory buffer and hand the items to the caller. Used by the
    * browser unload path so the client can attempt a `navigator.sendBeacon` for
@@ -311,20 +360,32 @@ export class HttpTransport {
    * Persist a single already-scrubbed item to the offline store. Session
    * lifecycle paths are skipped (counted as a real drop). Fail-open.
    */
-  persistOne(item: Pending): void {
+  persistOne(item: Pending, countDropOnSkip = true): void {
+    if (item.persistId) {
+      if (this.offlineEnabled && isPersistablePath(item.path)) {
+        try {
+          this.offlineQueue.enqueue({ id: item.persistId, path: item.path, payload: item.payload, ts: Date.now() });
+          this.persisted++;
+        } catch {
+          if (countDropOnSkip) this.dropped++;
+        }
+      }
+      return;
+    }
     // No real store (offline queue disabled / unavailable) → legacy in-memory
     // behavior: an evicted/overflow item is a real drop. Session lifecycle
     // paths are also a real drop (never persisted).
     if (!this.offlineEnabled || !isPersistablePath(item.path)) {
-      this.dropped++;
+      if (countDropOnSkip) this.dropped++;
       return;
     }
     try {
       const id = item.persistId ?? nextPersistedId();
       this.offlineQueue.enqueue({ id, path: item.path, payload: item.payload, ts: Date.now() });
+      item.persistId = id;
       this.persisted++;
     } catch {
-      this.dropped++;
+      if (countDropOnSkip) this.dropped++;
     }
   }
 
@@ -380,7 +441,7 @@ function isPermanentFailure(error: unknown): boolean {
 }
 
 function jitteredBackoff(failures: number): number {
-  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(8, failures - FAILURE_THRESHOLD));
+  const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, Math.min(8, failures - 1)));
   return Math.floor(exp / 2 + Math.random() * (exp / 2));
 }
 

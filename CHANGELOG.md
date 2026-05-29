@@ -5,6 +5,18 @@ All notable changes to `@allstak/js` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-05-30
+
+### Changed
+
+- **Offline-transport hardening.** The HTTP transport now persists a failing
+  event to the offline store immediately (in addition to the in-memory retry),
+  so an event survives a tab/process death before its next retry fires, and
+  schedules retries on a single coalesced timer with circuit-breaker-aware
+  backoff. A `closed` guard routes late events straight to the persistent store.
+- Documentation and source-comment wording cleanup across the package. No
+  runtime, API, or wire-contract changes from the cleanup.
+
 ## [0.3.0] — 2026-05-29
 
 ### Added

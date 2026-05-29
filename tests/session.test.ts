@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Session, SessionTracker } from '../src/session';
 import type { AllStakConfig } from '../src/client';
 import type { HttpTransport } from '../src/transport/http';
+import type { SessionStateStorage } from '../src/session';
 
 /**
  * The SessionTracker is exercised directly (mirroring the Java
@@ -32,9 +33,40 @@ function baseConfig(overrides: Partial<AllStakConfig> = {}): AllStakConfig {
   };
 }
 
+function makeStorage(initial?: Record<string, string>): SessionStateStorage & { data: Map<string, string> } {
+  const data = new Map<string, string>(Object.entries(initial ?? {}));
+  return {
+    data,
+    getItem: vi.fn((key: string) => data.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      data.set(key, value);
+    }),
+    removeItem: vi.fn((key: string) => {
+      data.delete(key);
+    }),
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
+  clearBrowserSessionState();
 });
+
+beforeEach(() => {
+  clearBrowserSessionState();
+});
+
+function clearBrowserSessionState(): void {
+  try {
+    const storage = window.localStorage;
+    for (let i = storage.length - 1; i >= 0; i--) {
+      const key = storage.key(i);
+      if (key?.startsWith('allstak.session.v1.')) storage.removeItem(key);
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 describe('Session status model', () => {
   it('starts ok and escalates ok -> errored on handled error', () => {
@@ -212,5 +244,85 @@ describe('SessionTracker browser graceful shutdown', () => {
     const end = sends.find((s) => s.path === '/ingest/v1/sessions/end');
     expect(end).toBeDefined();
     expect(end!.payload.status).toBe('ok');
+  });
+});
+
+describe('SessionTracker abnormal session recovery', () => {
+  it('does not report an abnormal session after a clean shutdown', () => {
+    const storage = makeStorage();
+    const key = 'allstak.session.test.clean';
+    const first = makeTransport();
+    const tracker = new SessionTracker(baseConfig(), first.transport, 'sid-clean', { storage, storageKey: key });
+    tracker.start();
+    tracker.end();
+
+    const second = makeTransport();
+    const nextTracker = new SessionTracker(baseConfig(), second.transport, 'sid-next', { storage, storageKey: key });
+    nextTracker.start();
+
+    expect(second.sends.filter((s) => s.path === '/ingest/v1/sessions/end')).toHaveLength(0);
+    expect(second.sends.filter((s) => s.path === '/ingest/v1/sessions/start')).toHaveLength(1);
+  });
+
+  it('reports a previous open session as abnormal on the next start', () => {
+    const storage = makeStorage();
+    const key = 'allstak.session.test.abnormal';
+    const first = makeTransport();
+    const tracker = new SessionTracker(baseConfig(), first.transport, 'sid-open', { storage, storageKey: key });
+    tracker.start();
+
+    const second = makeTransport();
+    const nextTracker = new SessionTracker(baseConfig(), second.transport, 'sid-next', { storage, storageKey: key });
+    nextTracker.start();
+
+    const recovered = second.sends.find((s) => s.path === '/ingest/v1/sessions/end');
+    expect(recovered).toBeDefined();
+    expect(recovered!.payload).toMatchObject({ sessionId: 'sid-open', status: 'abnormal' });
+    expect(second.sends.filter((s) => s.path === '/ingest/v1/sessions/start')).toHaveLength(1);
+  });
+
+  it('reports a previous crashed open session as crashed on the next start', () => {
+    const storage = makeStorage();
+    const key = 'allstak.session.test.crashed';
+    const first = makeTransport();
+    const tracker = new SessionTracker(baseConfig(), first.transport, 'sid-crashed', { storage, storageKey: key });
+    tracker.start();
+    tracker.recordCrash();
+
+    const second = makeTransport();
+    const nextTracker = new SessionTracker(baseConfig(), second.transport, 'sid-next', { storage, storageKey: key });
+    nextTracker.start();
+
+    const recovered = second.sends.find((s) => s.path === '/ingest/v1/sessions/end');
+    expect(recovered).toBeDefined();
+    expect(recovered!.payload).toMatchObject({ sessionId: 'sid-crashed', status: 'crashed' });
+  });
+
+  it('drops corrupt session state safely and starts a new session', () => {
+    const key = 'allstak.session.test.corrupt';
+    const storage = makeStorage({ [key]: '{not-json' });
+    const { transport, sends } = makeTransport();
+    const tracker = new SessionTracker(baseConfig(), transport, 'sid-new', { storage, storageKey: key });
+
+    expect(() => tracker.start()).not.toThrow();
+    expect(sends.filter((s) => s.path === '/ingest/v1/sessions/end')).toHaveLength(0);
+    expect(sends.filter((s) => s.path === '/ingest/v1/sessions/start')).toHaveLength(1);
+  });
+
+  it('does not duplicate abnormal recovery reports across repeated starts', () => {
+    const storage = makeStorage();
+    const key = 'allstak.session.test.dedupe';
+    const first = makeTransport();
+    new SessionTracker(baseConfig(), first.transport, 'sid-open', { storage, storageKey: key }).start();
+
+    const second = makeTransport();
+    const secondTracker = new SessionTracker(baseConfig(), second.transport, 'sid-second', { storage, storageKey: key });
+    secondTracker.start();
+    secondTracker.end();
+    const third = makeTransport();
+    new SessionTracker(baseConfig(), third.transport, 'sid-third', { storage, storageKey: key }).start();
+
+    expect(second.sends.filter((s) => s.path === '/ingest/v1/sessions/end' && s.payload.status === 'abnormal')).toHaveLength(1);
+    expect(third.sends.filter((s) => s.path === '/ingest/v1/sessions/end' && s.payload.status === 'abnormal')).toHaveLength(0);
   });
 });

@@ -1,5 +1,5 @@
 /**
- * Value-pattern PII scrubbing tests (Sentry data-scrubbing parity).
+ * Value-pattern PII scrubbing tests.
  *
  * Layering under test:
  *   A) ALWAYS scrub (regardless of sendDefaultPii): Luhn-valid credit cards,

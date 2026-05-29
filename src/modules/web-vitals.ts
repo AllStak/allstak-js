@@ -10,9 +10,9 @@ import { TracingModule } from './tracing';
  *   POST /ingest/v1/spans  →  SpanItem { op: 'web.vital', operation: 'web.vital',
  *                                        measurements: { LCP, CLS, INP, FCP, TTFB } }
  *
- * The backend's PerformanceRepository classifies `op IN ('pageload','navigation',
+ * The backend classifies `op IN ('pageload','navigation',
  * 'browser.resource','web.vital')` as the "web" category and persists the
- * `measurements` column to ClickHouse, which is how vitals reach the web-vitals
+ * `measurements` field, which is how vitals reach the web-vitals
  * dashboard.
  *
  * Metric derivation (web-vitals-style):

@@ -1,6 +1,6 @@
 import * as React from 'react';
 export { AllStak } from './index.mjs';
-import './database-BconFy9O.mjs';
+import './database-BAE1jk06.mjs';
 import './auto-breadcrumbs-DRB0ieVv.mjs';
 
 /**

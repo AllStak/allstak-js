@@ -1,12 +1,12 @@
 /**
  * Persistent / offline event queue.
  *
- * Sentry persists un-sent envelopes to an offline store (a cache dir / IndexedDB)
- * and replays them on the next init. This module brings the AllStak JS SDK to
- * parity: when an event cannot be delivered (network error, retries exhausted,
- * circuit open / offline, or the app/process is shutting down with events still
- * buffered) the transport writes the payload to a persistent store instead of
- * dropping it, then drains the store on the next init.
+ * Un-sent envelopes are persisted to an offline store (a cache dir / IndexedDB)
+ * and replayed on the next init: when an event cannot be delivered (network
+ * error, retries exhausted, circuit open / offline, or the app/process is
+ * shutting down with events still buffered) the transport writes the payload to
+ * a persistent store instead of dropping it, then drains the store on the next
+ * init.
  *
  * Invariants (all enforced by {@link HttpTransport}, documented here for the
  * reader):

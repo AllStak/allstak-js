@@ -22,7 +22,7 @@ const CANARY = 'should_not_leak';
 
 interface Captured { url: string; payload: any }
 
-function setupAllStak(): { captured: Captured[] } {
+function setupAllStak(config: Record<string, unknown> = {}): { captured: Captured[] } {
   const captured: Captured[] = [];
   const fetchSpy = vi.fn(async (url: string, init: RequestInit) => {
     let payload: unknown = null;
@@ -39,6 +39,7 @@ function setupAllStak(): { captured: Captured[] } {
     environment: 'test',
     release: 'redaction-tests@1',
     serviceName: 'redaction-tests',
+    ...config,
   });
   return { captured };
 }
@@ -173,6 +174,58 @@ describe('AllStak.captureException — never leaks caller context to the wire', 
     expect(crumb).toBeTruthy();
     expect(crumb.data.Authorization).toBe(REDACTED);
     expect(crumb.data.status).toBe(200);
+  });
+
+  it('runs final sanitization after beforeSend so hooks cannot reintroduce secrets', async () => {
+    const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature';
+    ({ captured } = setupAllStak({
+      beforeSend(event: any) {
+        event.metadata = {
+          ...event.metadata,
+          Authorization: `Bearer ${CANARY}`,
+          Cookie: `sid=${CANARY}`,
+          nested: {
+            password: CANARY,
+            apiKey: CANARY,
+            jwt: JWT,
+            values: [`Bearer ${CANARY}`, { secret: CANARY }],
+          },
+          card: '4111111111111111',
+        };
+        event.requestContext = {
+          ...event.requestContext,
+          headers: { 'Set-Cookie': `a=${CANARY}` },
+        };
+        event.breadcrumbs = [
+          ...(event.breadcrumbs ?? []),
+          { type: 'default', message: `Bearer ${CANARY}`, data: { token: CANARY } },
+        ];
+        event.fingerprint = [`Bearer ${CANARY}`];
+        return event;
+      },
+    }));
+
+    AllStak.captureException(new Error('hook-secret-test'), { order_id: 'ORD-77' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const errorPayload = captured.find((c) => c.url.endsWith('/ingest/v1/errors'))?.payload;
+    const raw = JSON.stringify(errorPayload);
+    expect(errorPayload).toBeTruthy();
+    expect(raw).not.toContain(CANARY);
+    expect(raw).not.toContain(JWT);
+    expect(raw).not.toContain('4111111111111111');
+    expect(errorPayload.metadata.Authorization).toBe(REDACTED);
+    expect(errorPayload.metadata.Cookie).toBe(REDACTED);
+    expect(errorPayload.metadata.nested.password).toBe(REDACTED);
+    expect(errorPayload.metadata.nested.apiKey).toBe(REDACTED);
+    expect(errorPayload.metadata.nested.jwt).toBe(REDACTED);
+    expect(errorPayload.metadata.nested.values[0]).toBe(REDACTED);
+    expect(errorPayload.metadata.nested.values[1].secret).toBe(REDACTED);
+    expect(errorPayload.metadata.card).toBe(REDACTED);
+    expect(errorPayload.requestContext.headers['Set-Cookie']).toBe(REDACTED);
+    expect(errorPayload.breadcrumbs.at(-1).message).toBe(REDACTED);
+    expect(errorPayload.breadcrumbs.at(-1).data.token).toBe(REDACTED);
+    expect(errorPayload.fingerprint[0]).toBe(REDACTED);
   });
 
   it('honors config.redactKeys for tenant-specific sensitive fields', async () => {

@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-30
 **SDK version:** built from `allstak-js` (develop branch)
-**Backend:** AllStak Spring Boot @ `http://localhost:8080`
+**Backend:** AllStak ingest API @ `http://localhost:8080`
 **Dashboard:** `http://localhost:3000`
 **Test project ID:** `c1a88f24-29df-4066-b607-a32e43bfa775`
 
@@ -10,7 +10,7 @@
 
 ## Summary
 
-All three framework integrations (**Vanilla JS**, **React/Vite**, **Node.js**) passed end-to-end validation. Data was confirmed in ClickHouse via the AllStak dashboard and direct DB queries. Every ingest endpoint returned `202 Accepted` for every request across all frameworks.
+All three framework integrations (**Vanilla JS**, **React/Vite**, **Node.js**) passed end-to-end validation. Data was confirmed via the AllStak dashboard and direct DB queries. Every ingest endpoint returned `202 Accepted` for every request across all frameworks.
 
 | Framework | App | Requests | Failed | Logs | Errors | HTTP Reqs | Replay |
 |-----------|-----|----------|--------|------|--------|-----------|--------|
@@ -18,55 +18,25 @@ All three framework integrations (**Vanilla JS**, **React/Vite**, **Node.js**) p
 | React/Vite | `examples/react-app` | 59 | 0 | ✅ | ✅ | ✅ | ✅ |
 | Node.js | `examples/node-app` | ~20 | 0 | ✅ | ✅ | ✅ | N/A |
 
-**Total ClickHouse records (24h):** 35 logs · 23 errors · 32 HTTP requests · 1,500 replay events
+**Total stored records (24h):** 35 logs · 23 errors · 32 HTTP requests · 1,500 replay events
 
 ---
 
-## Infrastructure Fixes Applied
+## Local Environment Fixes Applied
 
-The following backend fixes were required before any framework integration could succeed. All fixes are committed.
+The following local-environment fixes were required before any framework integration could succeed against the local backend.
 
-### 1. Kafka Bootstrap Server (docker-compose.yml)
+### 1. Message Broker Bootstrap (docker-compose.yml)
 
-The backend Kafka consumer was configured with `kafka:9092` (EXTERNAL listener), which advertises itself as `localhost:9092` — unreachable from within Docker. Changed to the internal PLAINTEXT listener.
+The local broker bootstrap was configured with an EXTERNAL listener that advertises itself as `localhost` — unreachable from within Docker. Changed to the internal listener port.
 
-```yaml
-# Before
-KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+### 2. CORS Policy
 
-# After
-KAFKA_BOOTSTRAP_SERVERS: kafka:19092
-```
+Browser SDK calls are cross-origin (e.g., `localhost:5176` → `localhost:8080`). The local backend lacked a CORS configuration, blocking all browser ingest calls. Added permissive CORS for ingest and webhook routes in the local config, exposing `X-AllStak-Key` and `Content-Type`.
 
-### 2. CORS Policy (SecurityConfig.java)
+### 3. HTTP Request DTO — Nullable projectId
 
-Browser SDK calls are cross-origin (e.g., `localhost:5176` → `localhost:8080`). The backend lacked a `CorsConfigurationSource` bean, blocking all browser ingest calls. Added wildcard CORS for ingest and webhook routes.
-
-```java
-// SecurityConfig.java — new bean
-@Bean
-public CorsConfigurationSource corsConfigurationSource() {
-    CorsConfiguration ingestCors = new CorsConfiguration();
-    ingestCors.setAllowedOriginPatterns(List.of("*"));
-    ingestCors.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
-    ingestCors.setAllowedHeaders(List.of("*"));
-    ingestCors.setExposedHeaders(List.of("X-AllStak-Key", "Content-Type"));
-    ingestCors.setMaxAge(3600L);
-    // ...registered for /ingest/**, /api/**, /webhooks/**
-}
-```
-
-### 3. HTTP Request DTO — Nullable projectId (HttpRequestIngestRequest.java)
-
-The HTTP request ingest DTO had `@NotNull UUID projectId`, but the SDK sends `{ requests: [...] }` without a `projectId` field (it comes from the API key, resolved in the filter). This caused `422 Unprocessable Entity`.
-
-```java
-// Before
-public record HttpRequestIngestRequest(@NotNull UUID projectId, ...)
-
-// After
-public record HttpRequestIngestRequest(@Nullable UUID projectId, ...)
-```
+The HTTP request ingest DTO required a non-null `projectId`, but the SDK sends `{ requests: [...] }` without a `projectId` field (it comes from the API key, resolved in the filter). This caused `422 Unprocessable Entity`. The field was made nullable.
 
 ### 4. Cron Monitor Slugs Must Pre-Exist
 
@@ -121,7 +91,7 @@ The heartbeat endpoint (`/ingest/v1/heartbeat`) returns `404` if the slug doesn'
 
 **HTTP Requests page** — 21 inbound (`app.allstak-vanilla.com`), 1 outbound (`api.external-service.com`). P95 latency 438ms, P99 451ms.
 
-**Session Replay (ClickHouse)** — session `8b94008a`:
+**Session Replay (stored)** — session `8b94008a`:
 - `click`: 27 events
 - `mutation`: 27 events
 - `input`: 1 event (masked)
@@ -167,7 +137,7 @@ export default AllStak;
 | Input masking (`maskAllInputs: true`) | password field | ✅ |
 | `setUser` + `setTag` | 1 | ✅ |
 
-### ClickHouse Confirmation
+### Storage Confirmation
 
 **Logs** — `allstak-react-demo`: debug(1), error(1), fatal(1), info(4), warn(1)
 **Errors** — `react-example`: APIError(1), Message(3), TypeError(1), Error(1)
@@ -194,7 +164,7 @@ export default AllStak;
 | `heartbeat` | 4 job slugs, success + failure ✅ |
 | No session replay | Correctly absent in Node build ✅ |
 
-### ClickHouse Confirmation
+### Storage Confirmation
 
 **Logs** — `allstak-node-example`: debug(1), error(1), fatal(1), info(2), warn(1)
 **Errors** — `node-example`: DatabaseError(1), TypeError(1), Message(2)
@@ -210,7 +180,7 @@ Verified via backend logs: requests that exceed 3000ms are aborted by the SDK fe
 
 ### HTTP Request Buffer (20-item flush)
 
-The vanilla JS demo triggered a 20-item batch by clicking "Bulk 20 batch flush". ClickHouse received all 20 records in a single ingest call (`POST /ingest/v1/http-requests` with `requests[].length === 20`). Returned 202.
+The vanilla JS demo triggered a 20-item batch by clicking "Bulk 20 batch flush". The backend received all 20 records in a single ingest call (`POST /ingest/v1/http-requests` with `requests[].length === 20`). Returned 202.
 
 ### Session Replay Buffer (50-event flush)
 
@@ -218,7 +188,7 @@ React app session replay accumulated 50+ mutation events from DOM interactions, 
 
 ### Masked Input in Session Replay
 
-The React app typed `mysecretpassword123` into a password field. The activity log showed `input event (masked)` for each keystroke. The ClickHouse `event_data` field was confirmed to not contain the raw value.
+The React app typed `mysecretpassword123` into a password field. The activity log showed `input event (masked)` for each keystroke. The stored `event_data` field was confirmed to not contain the raw value.
 
 ---
 
@@ -226,7 +196,7 @@ The React app typed `mysecretpassword123` into a password field. The activity lo
 
 ### Heartbeat Persistence
 
-The `/ingest/v1/heartbeat` endpoint accepts requests and returns `202`, but no storage layer exists for the heartbeat data. Neither ClickHouse nor Postgres have a heartbeat/ping table. The `cron_monitors` table has no `last_ping_at` or status columns. As a result, the Cron Monitors dashboard page always shows `status: pending` and `LAST PING: —` regardless of how many heartbeats have been sent.
+The `/ingest/v1/heartbeat` endpoint accepts requests and returns `202`, but no storage layer exists for the heartbeat data — there is no heartbeat/ping table. The `cron_monitors` table has no `last_ping_at` or status columns. As a result, the Cron Monitors dashboard page always shows `status: pending` and `LAST PING: —` regardless of how many heartbeats have been sent.
 
 **Impact:** Heartbeat ingest works end-to-end to the point of acceptance; monitoring and alerting on cron job health is not yet functional.
 

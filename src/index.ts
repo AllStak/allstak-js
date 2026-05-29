@@ -191,6 +191,11 @@ export const AllStak = {
     return ensureInit().flush(timeoutMs);
   },
 
+  close(): void {
+    instance?.destroy();
+    instance = null;
+  },
+
   /**
    * Run `callback` with a fresh, temporary {@link Scope} that isolates any
    * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for

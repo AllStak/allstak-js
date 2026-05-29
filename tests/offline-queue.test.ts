@@ -37,9 +37,11 @@ function evt(path: string, payload: unknown, order = 0): PersistedEvent {
 }
 
 const SECRET = 'super-secret-token-value';
+const wait = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
 afterEach(() => {
   setPersistence(null);
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -260,6 +262,78 @@ describe('createOfflineQueue', () => {
 // ── 6. Transport integration: persist-on-failure + drain-on-init ─────────────
 
 describe('HttpTransport offline persistence', () => {
+  it('automatically retries buffered events after an outage without a new event', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const store = memoryStorage();
+    const q = new LocalStorageOfflineQueue(store, 1000, 5_000_000, 48 * 3600_000);
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('backend down'))
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const transport = new HttpTransport('https://api.invalid', 'ask_test', q);
+    await transport.send('/ingest/v1/errors', { message: 'recover me' });
+    await wait(25);
+
+    expect(transport.getBufferSize()).toBe(1);
+    expect(q.load()).toHaveLength(1);
+
+    await wait(350);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(transport.getBufferSize()).toBe(0);
+    expect(q.load()).toEqual([]);
+  });
+
+  it('persists circuit-open events and schedules a bounded retry', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const store = memoryStorage();
+    const q = new LocalStorageOfflineQueue(store, 1000, 5_000_000, 48 * 3600_000);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    const transport = new HttpTransport('https://api.invalid', 'ask_test', q);
+
+    for (let i = 0; i < 3; i++) await transport.send('/ingest/v1/errors', { i });
+    await wait(50);
+    expect(transport.getStats().circuitOpenUntil).toBeGreaterThan(Date.now());
+
+    await transport.send('/ingest/v1/errors', { duringCircuit: true });
+    await wait(10);
+
+    expect(q.load().some((e) => (e.payload as any).duringCircuit === true)).toBe(true);
+    expect(transport.getStats().persisted).toBeGreaterThan(0);
+    expect(transport.getStats().failed).toBe(3);
+
+    await wait(1_200);
+    expect((globalThis.fetch as any).mock.calls.length).toBeLessThan(25);
+  });
+
+  it('counts buffer overflow drops when no persistent queue is available', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    const transport = new HttpTransport('https://api.invalid', 'ask_test');
+
+    for (let i = 0; i < 150; i++) await transport.send('/ingest/v1/errors', { i });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(transport.getBufferSize()).toBeLessThanOrEqual(100);
+    expect(transport.getStats().dropped).toBeGreaterThan(0);
+    expect(transport.getStats().persisted).toBe(0);
+  });
+
+  it('persists buffered events during unload/shutdown flush', async () => {
+    const store = memoryStorage();
+    const q = new LocalStorageOfflineQueue(store, 1000, 5_000_000, 48 * 3600_000);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+    const transport = new HttpTransport('https://api.invalid', 'ask_test', q);
+
+    await transport.send('/ingest/v1/errors', { unload: true });
+    await wait(25);
+    transport.persistBufferedNow();
+
+    expect(transport.getBufferSize()).toBe(0);
+    expect(q.load().some((e) => (e.payload as any).unload === true)).toBe(true);
+  });
+
   it('persists evicted events when the buffer overflows during an outage', async () => {
     const store = memoryStorage();
     const q = new LocalStorageOfflineQueue(store, 1000, 5_000_000, 48 * 3600_000);

@@ -1,5 +1,5 @@
-import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-BconFy9O.js';
-export { O as OfflineQueue, b as OfflineQueueOptions, P as PersistedEvent, c as PersistenceAdapter, d as createOfflineQueue, s as setPersistence } from './database-BconFy9O.js';
+import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-BAE1jk06.js';
+export { O as OfflineQueue, b as OfflineQueueOptions, P as PersistedEvent, c as PersistenceAdapter, d as createOfflineQueue, s as setPersistence } from './database-BAE1jk06.js';
 import { H as HttpBodyCaptureOptions, T as TracePropagationTarget } from './auto-breadcrumbs-DRB0ieVv.js';
 
 interface ErrorEvent {
@@ -631,7 +631,7 @@ interface AllStakConfig extends ReleaseMetadata {
     tags?: Record<string, string>;
     /**
      * Send personally-identifiable information that the SDK would otherwise
-     * scrub from free-text VALUES. Default `false` (Sentry parity).
+     * scrub from free-text VALUES. Default `false`.
      *
      * Layering (see {@link import('./utils/redact')}):
      *   - ALWAYS scrubbed regardless of this flag: Luhn-valid credit-card
@@ -641,7 +641,7 @@ interface AllStakConfig extends ReleaseMetadata {
      *
      * This flag does NOT affect the EXPLICIT user object set via {@link user} /
      * `setUser()` — `user.id` / `user.email` are intentional identification and
-     * always ship as before, matching Sentry. It also does not affect key-based
+     * always ship as before. It also does not affect key-based
      * secret redaction (auth/cookie/token/etc.), which is always on.
      *
      * When `false`, any client IP the SDK auto-collects is dropped/masked; when
@@ -996,7 +996,7 @@ declare function _resetRuntimeReleaseRegistrationForTest(): void;
 
 /**
  * Lifecycle status of a release-health session. Vocabulary matches the AllStak
- * backend's `/ingest/v1/sessions/end` contract and Sentry's release-health
+ * backend's `/ingest/v1/sessions/end` contract and the SDK's release-health
  * conventions, and mirrors the Java SDK's {@code SessionStatus}:
  *
  * - `ok`       — session ended normally with at most non-fatal logs.
@@ -1008,6 +1008,15 @@ declare function _resetRuntimeReleaseRegistrationForTest(): void;
  *                that pass an explicit final status to {@link SessionTracker.end}.
  */
 type SessionStatus = 'ok' | 'errored' | 'crashed' | 'abnormal';
+interface SessionStateStorage {
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): void;
+    removeItem(key: string): void;
+}
+interface SessionTrackerOptions {
+    storage?: SessionStateStorage | null;
+    storageKey?: string;
+}
 /**
  * A single release-health session — one per process / app-launch in the default
  * "single session" mode. Mirrors the Java SDK's {@code Session} status model:
@@ -1052,7 +1061,9 @@ declare class SessionTracker {
     private active;
     private ended;
     private cleanup;
-    constructor(config: AllStakConfig, transport: HttpTransport, sessionId: string);
+    private readonly storage;
+    private readonly storageKey;
+    constructor(config: AllStakConfig, transport: HttpTransport, sessionId: string, options?: SessionTrackerOptions);
     /**
      * Idempotent. Reuses the client's existing session id, sends `/sessions/start`,
      * and installs the graceful-shutdown end hooks. Returns the active session.
@@ -1076,6 +1087,11 @@ declare class SessionTracker {
      * session is still attributable even when no release is configured.
      */
     private resolveRelease;
+    private recoverPreviousSession;
+    private updateOpenState;
+    private readState;
+    private writeState;
+    private removeState;
     private installShutdownHooks;
     private removeShutdownHooks;
 }
@@ -1272,6 +1288,7 @@ declare const AllStak: {
      * `false` otherwise.
      */
     flush(timeoutMs?: number): Promise<boolean>;
+    close(): void;
     /**
      * Run `callback` with a fresh, temporary {@link Scope} that isolates any
      * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for

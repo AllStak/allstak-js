@@ -1,5 +1,5 @@
 export { AllStak } from './index.js';
-import './database-BconFy9O.js';
+import './database-BAE1jk06.js';
 import './auto-breadcrumbs-DRB0ieVv.js';
 
 /**
