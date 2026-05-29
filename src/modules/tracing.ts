@@ -406,6 +406,51 @@ export class TracingModule {
     this.transport.send(INGEST_PATH, payload);
   }
 
+  /**
+   * Emit a fully-formed span that was assembled outside the normal
+   * start/finish lifecycle (e.g. Core Web Vitals, which are observed
+   * asynchronously and reported at page-hide as a single `web.vital` span).
+   *
+   * The span still runs through the same ignore-list + span-processor +
+   * beforeSendSpan pipeline and the same batched transport (so it respects the
+   * offline queue and retry/backoff). Service/environment/platform defaults are
+   * back-filled from the module config when the caller leaves them blank. Any
+   * caller-supplied `traceId`/`spanId` are kept, otherwise fresh ids are minted
+   * so the span is self-contained. Fully fail-open.
+   */
+  emitSpan(partial: Partial<SpanData> & { operation: string }): void {
+    try {
+      const now = Date.now();
+      const spanData: SpanData = {
+        traceId: partial.traceId || generateId().replace(/-/g, ''),
+        spanId: partial.spanId || generateId().replace(/-/g, ''),
+        parentSpanId: partial.parentSpanId ?? '',
+        operation: partial.operation,
+        description: partial.description ?? '',
+        status: partial.status ?? 'ok',
+        durationMs: partial.durationMs ?? 0,
+        startTimeMillis: partial.startTimeMillis ?? now,
+        endTimeMillis: partial.endTimeMillis ?? now,
+        service: partial.service ?? this.service,
+        environment: partial.environment ?? this.environment,
+        tags: partial.tags ?? {},
+        data: partial.data ?? '',
+        op: partial.op ?? inferOp(partial.operation),
+        platform: partial.platform ?? this.platform,
+        measurements: partial.measurements,
+        attributes: partial.attributes,
+      };
+      const finalSpan = this.processSpan(spanData);
+      if (!finalSpan) return;
+      this.completedSpans.push(finalSpan);
+      // Vitals are emitted at page-hide; flush immediately so the unload-time
+      // beacon/persist path can pick them up rather than waiting for the timer.
+      this.flush();
+    } catch {
+      /* fail-open: telemetry emission must never break the host page */
+    }
+  }
+
   /** Reset trace context — clears trace ID and span stack. */
   resetTrace(): void {
     const state = this.state();

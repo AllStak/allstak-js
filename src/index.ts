@@ -39,6 +39,8 @@ export type { HttpRequestItem } from './modules/http-requests';
 export type { HeartbeatOptions } from './modules/cron';
 export type { SpanData, SpanOptions, SpanProcessor, SpanFilterPattern, TracesSampler, SamplingContext } from './modules/tracing';
 export { Span } from './modules/tracing';
+export { WebVitalsModule, isWebVitalsSupported } from './modules/web-vitals';
+export type { WebVitalsContext } from './modules/web-vitals';
 export type { DbQueryItem } from './modules/database';
 export { DatabaseModule } from './modules/database';
 
@@ -208,6 +210,15 @@ export const AllStak = {
 
   getSessionId(): string {
     return ensureInit().getSessionId();
+  },
+
+  /**
+   * Start Core Web Vitals collection (browser only). Auto-started at init in the
+   * browser unless `enableWebVitals: false` was passed. Call manually to re-arm
+   * after an opt-out. No-op off-browser; idempotent once running.
+   */
+  startWebVitals(): void {
+    ensureInit().startWebVitals();
   },
 
   getTransportStats(): TransportStats {

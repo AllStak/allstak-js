@@ -290,6 +290,100 @@ declare class Span {
     get traceId(): string;
     get isFinished(): boolean;
 }
+declare class TracingModule {
+    private transport;
+    private service;
+    private environment;
+    private platform;
+    private globalState;
+    private asyncStorage;
+    private completedSpans;
+    private spanProcessors;
+    private beforeSendSpan?;
+    private ignoreSpans;
+    private tracesSampleRate?;
+    private tracesSampler?;
+    private flushTimer;
+    constructor(transport: HttpTransport, config: {
+        service?: string;
+        environment?: string;
+        platform?: string;
+        beforeSendSpan?: SpanProcessor;
+        ignoreSpans?: SpanFilterPattern[];
+        tracesSampleRate?: number;
+        tracesSampler?: TracesSampler;
+    });
+    addSpanProcessor(processor: SpanProcessor): void;
+    /**
+     * Run work inside an isolated trace context. In Node this uses
+     * AsyncLocalStorage so overlapping requests don't share trace/span state.
+     * Browser builds fall back to the historical global context.
+     */
+    withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
+    withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+    private state;
+    /**
+     * Record the sampling decision inherited from an incoming `traceparent`.
+     * Surfaced to {@link TracesSampler} as `parentSampled`; when no
+     * `tracesSampler`/`tracesSampleRate` is configured this has no effect on the
+     * local decision (back-compat: tracing stays always-on).
+     */
+    setParentSampled(parentSampled: boolean | undefined): void;
+    /**
+     * The sticky head-of-trace sampling decision for the current trace. Returns
+     * `true` when undecided so propagation/recording stay in the historical
+     * always-sampled behavior until a decision is forced.
+     */
+    getSampled(): boolean;
+    /** Get the current trace ID, creating one if none exists. */
+    getTraceId(): string;
+    /** Set the trace ID explicitly (e.g. from an incoming request header). */
+    setTraceId(traceId: string): void;
+    getRequestId(): string | null;
+    setRequestId(requestId: string): void;
+    /** Get the current active span ID (top of the span stack), or null. */
+    getCurrentSpanId(): string | null;
+    /**
+     * Start a new span. The span is automatically parented to the current
+     * active span (if any). Call span.finish() when the operation completes.
+     */
+    startSpan(operation: string, options?: SpanOptions): Span;
+    /** Flush all completed spans to the backend. */
+    flush(): void;
+    /**
+     * Emit a fully-formed span that was assembled outside the normal
+     * start/finish lifecycle (e.g. Core Web Vitals, which are observed
+     * asynchronously and reported at page-hide as a single `web.vital` span).
+     *
+     * The span still runs through the same ignore-list + span-processor +
+     * beforeSendSpan pipeline and the same batched transport (so it respects the
+     * offline queue and retry/backoff). Service/environment/platform defaults are
+     * back-filled from the module config when the caller leaves them blank. Any
+     * caller-supplied `traceId`/`spanId` are kept, otherwise fresh ids are minted
+     * so the span is self-contained. Fully fail-open.
+     */
+    emitSpan(partial: Partial<SpanData> & {
+        operation: string;
+    }): void;
+    /** Reset trace context — clears trace ID and span stack. */
+    resetTrace(): void;
+    /**
+     * Resolve (and memoize) the sticky head-of-trace sampling decision for the
+     * current trace.
+     *
+     * Precedence:
+     * 1. A decision already made for this trace is reused (sticky inheritance).
+     * 2. `tracesSampler(context)` — return value coerced to a decision.
+     * 3. `tracesSampleRate` — probabilistic.
+     * 4. Neither configured → `true` (BACK-COMPAT default: existing users who set
+     *    nothing keep full tracing; we never silently disable it).
+     */
+    private ensureSamplingDecision;
+    /** Stop the flush timer and do a final flush. */
+    destroy(): void;
+    private processSpan;
+    private shouldIgnoreSpan;
+}
 
 interface AllStakIntegration {
     name: string;
@@ -509,6 +603,16 @@ interface AllStakConfig extends ReleaseMetadata {
      * existing in-memory buffer behavior).
      */
     enableOfflineQueue?: boolean;
+    /**
+     * Collect Core Web Vitals (LCP, CLS, INP/FID, FCP, TTFB) in the browser and
+     * report them to AllStak as a single `web.vital` span at page-hide. Default
+     * `true` in browser contexts (a no-op when `window`/`PerformanceObserver` are
+     * absent, e.g. Node/edge/RN-without-DOM). Set `false` to opt out. The metrics
+     * are observed with native `PerformanceObserver`/navigation-timing — no extra
+     * dependency is added — and emission reuses the existing span transport, so it
+     * respects the offline queue, span processors, and `beforeSendSpan`.
+     */
+    enableWebVitals?: boolean;
     /** Offline-queue tuning. See {@link enableOfflineQueue}. */
     offlineQueue?: {
         /** Node only: spool directory. Default `<tmpdir>/allstak-offline-queue`. */
@@ -680,6 +784,7 @@ declare class AllStakClient {
     private cron;
     private tracing;
     private _database;
+    private webVitals;
     private baseUrl;
     private integrations;
     private sessionReplay;
@@ -803,6 +908,13 @@ declare class AllStakClient {
     }): void;
     getSessionId(): string;
     getTransportStats(): TransportStats;
+    /**
+     * Start Core Web Vitals collection (browser only). Auto-started at init in the
+     * browser bundle unless `enableWebVitals === false`; call this manually to
+     * (re)arm it after an explicit opt-out, or from a custom integration. A no-op
+     * off-browser and idempotent once collection is running.
+     */
+    startWebVitals(): void;
     /**
      * Start a new span. Automatically parented to the current active span.
      * Call `span.finish()` when the operation completes.
@@ -1012,6 +1124,72 @@ interface ReplayEvent {
     environment: string;
 }
 
+interface WebVitalsContext {
+    release?: string;
+    environment?: string;
+    service?: string;
+    sessionId?: string;
+    platform?: string;
+}
+/**
+ * Detect a browser-with-PerformanceObserver runtime. Web Vitals are a no-op
+ * everywhere else (Node, edge, RN without DOM, jsdom without the observer).
+ */
+declare function isWebVitalsSupported(): boolean;
+declare class WebVitalsModule {
+    private tracing;
+    private context;
+    private observers;
+    private cleanup;
+    private sent;
+    private started;
+    private lcp?;
+    private cls;
+    private clsObserved;
+    private inp?;
+    private fid?;
+    private fcp?;
+    private ttfb?;
+    constructor(tracing: TracingModule, context?: WebVitalsContext);
+    /**
+     * Begin observing Core Web Vitals. Idempotent and fail-open: a second call is
+     * a no-op, and any error wiring an observer is swallowed so the host page is
+     * never affected. Does nothing outside a browser-with-PerformanceObserver.
+     */
+    start(): void;
+    private get PO();
+    private safeObserve;
+    /** LCP = the value of the LAST largest-contentful-paint entry. */
+    private observeLcp;
+    /** CLS = sum of layout-shift values WITHOUT recent user input. */
+    private observeCls;
+    /**
+     * INP from `event` timing (max interaction latency), and FID from the first
+     * `first-input` entry as a fallback. INP entries are large, so the browser
+     * requires an explicit `durationThreshold`; we keep the default and read the
+     * worst observed duration.
+     */
+    private observeInp;
+    /** FCP from the paint-timing `first-contentful-paint` entry. */
+    private observeFcp;
+    /**
+     * TTFB (and a fallback FCP) from navigation timing. `responseStart` relative
+     * to the navigation start is TTFB. Read eagerly at start so it is available
+     * even if the navigation entry buffer is empty by report time.
+     */
+    private collectNavigationTiming;
+    private installReportHooks;
+    /**
+     * Finalize the collected metrics and emit a single `web.vital` span. Guarded
+     * so it sends at most once (visibilitychange + pagehide can both fire on a
+     * single tab close). Emits nothing when no metric was collected.
+     */
+    report(): void;
+    private disconnectObservers;
+    /** Stop observing and remove report hooks. Best-effort, idempotent. */
+    destroy(): void;
+}
+
 declare const AllStak: {
     init(config: AllStakConfig): AllStakClient;
     captureException(error: Error, context?: Record<string, unknown>): void;
@@ -1103,6 +1281,12 @@ declare const AllStak: {
     getCurrentScope(): Scope | null;
     configureScope(callback: (scope: Scope) => void): void;
     getSessionId(): string;
+    /**
+     * Start Core Web Vitals collection (browser only). Auto-started at init in the
+     * browser unless `enableWebVitals: false` was passed. Call manually to re-arm
+     * after an opt-out. No-op off-browser; idempotent once running.
+     */
+    startWebVitals(): void;
     getTransportStats(): TransportStats;
     /**
      * Start a new span. Automatically parented to the current active span.
@@ -1126,4 +1310,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Session, type SessionStatus, SessionTracker, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, parseGitRelease, registerRuntimeRelease };
+export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Session, type SessionStatus, SessionTracker, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, type WebVitalsContext, WebVitalsModule, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, isWebVitalsSupported, parseGitRelease, registerRuntimeRelease };

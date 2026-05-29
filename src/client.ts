@@ -6,6 +6,7 @@ import { SessionReplayModule } from './modules/session-replay';
 import { HttpRequestModule, HttpRequestItem } from './modules/http-requests';
 import { CronModule, HeartbeatOptions } from './modules/cron';
 import { TracingModule, Span, SpanData, SpanFilterPattern, SpanOptions, SpanProcessor, TracesSampler, SamplingContext } from './modules/tracing';
+import { WebVitalsModule, isWebVitalsSupported } from './modules/web-vitals';
 import { DatabaseModule, DbQueryItem } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
 import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
@@ -150,6 +151,16 @@ export interface AllStakConfig extends ReleaseMetadata {
    * existing in-memory buffer behavior).
    */
   enableOfflineQueue?: boolean;
+  /**
+   * Collect Core Web Vitals (LCP, CLS, INP/FID, FCP, TTFB) in the browser and
+   * report them to AllStak as a single `web.vital` span at page-hide. Default
+   * `true` in browser contexts (a no-op when `window`/`PerformanceObserver` are
+   * absent, e.g. Node/edge/RN-without-DOM). Set `false` to opt out. The metrics
+   * are observed with native `PerformanceObserver`/navigation-timing — no extra
+   * dependency is added — and emission reuses the existing span transport, so it
+   * respects the offline queue, span processors, and `beforeSendSpan`.
+   */
+  enableWebVitals?: boolean;
   /** Offline-queue tuning. See {@link enableOfflineQueue}. */
   offlineQueue?: {
     /** Node only: spool directory. Default `<tmpdir>/allstak-offline-queue`. */
@@ -414,6 +425,7 @@ export class AllStakClient {
   private cron: CronModule;
   private tracing: TracingModule;
   private _database: DatabaseModule;
+  private webVitals: WebVitalsModule | null = null;
   private baseUrl: string;
   private integrations: IntegrationIndex = {};
   private sessionReplay: SessionReplayModule | null = null;
@@ -518,6 +530,21 @@ export class AllStakClient {
         this.config,
         this.sessionId,
       );
+    }
+
+    // Core Web Vitals (browser only). Default ON; opt out via
+    // enableWebVitals:false. Reuses the existing span transport so it respects
+    // the offline queue + span processors. A no-op outside a browser-with-
+    // PerformanceObserver, so it is safe to wire unconditionally here.
+    if (config.enableWebVitals !== false && isWebVitalsSupported() && !this.isNodeBuild()) {
+      this.webVitals = new WebVitalsModule(this.tracing, {
+        release: config.release,
+        environment: config.environment,
+        service: config.tags?.service,
+        sessionId: this.sessionId,
+        platform: config.platform,
+      });
+      this.webVitals.start();
     }
 
     // Release-health: one session per process / app-launch. Opt out via
@@ -888,6 +915,26 @@ export class AllStakClient {
     return this.transport.getStats();
   }
 
+  /**
+   * Start Core Web Vitals collection (browser only). Auto-started at init in the
+   * browser bundle unless `enableWebVitals === false`; call this manually to
+   * (re)arm it after an explicit opt-out, or from a custom integration. A no-op
+   * off-browser and idempotent once collection is running.
+   */
+  startWebVitals(): void {
+    if (this.isNodeBuild() || !isWebVitalsSupported()) return;
+    if (!this.webVitals) {
+      this.webVitals = new WebVitalsModule(this.tracing, {
+        release: this.config.release,
+        environment: this.config.environment,
+        service: this.config.tags?.service,
+        sessionId: this.sessionId,
+        platform: this.config.platform,
+      });
+    }
+    this.webVitals.start();
+  }
+
   // ------------------------------------------------------------------
   // Distributed Tracing
   // ------------------------------------------------------------------
@@ -1006,6 +1053,7 @@ export class AllStakClient {
     // tearing down transport-backed modules. Best-effort + fail-open.
     this.sessionTracker?.end();
     setTraceResolver(null);
+    this.webVitals?.destroy();
     this.tracing.destroy();
     this.errors.destroy();
     this.httpRequests.destroy();

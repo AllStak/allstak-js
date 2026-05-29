@@ -2001,6 +2001,47 @@ var TracingModule = class {
     const payload = { spans };
     this.transport.send(INGEST_PATH6, payload);
   }
+  /**
+   * Emit a fully-formed span that was assembled outside the normal
+   * start/finish lifecycle (e.g. Core Web Vitals, which are observed
+   * asynchronously and reported at page-hide as a single `web.vital` span).
+   *
+   * The span still runs through the same ignore-list + span-processor +
+   * beforeSendSpan pipeline and the same batched transport (so it respects the
+   * offline queue and retry/backoff). Service/environment/platform defaults are
+   * back-filled from the module config when the caller leaves them blank. Any
+   * caller-supplied `traceId`/`spanId` are kept, otherwise fresh ids are minted
+   * so the span is self-contained. Fully fail-open.
+   */
+  emitSpan(partial) {
+    try {
+      const now = Date.now();
+      const spanData = {
+        traceId: partial.traceId || generateId().replace(/-/g, ""),
+        spanId: partial.spanId || generateId().replace(/-/g, ""),
+        parentSpanId: partial.parentSpanId ?? "",
+        operation: partial.operation,
+        description: partial.description ?? "",
+        status: partial.status ?? "ok",
+        durationMs: partial.durationMs ?? 0,
+        startTimeMillis: partial.startTimeMillis ?? now,
+        endTimeMillis: partial.endTimeMillis ?? now,
+        service: partial.service ?? this.service,
+        environment: partial.environment ?? this.environment,
+        tags: partial.tags ?? {},
+        data: partial.data ?? "",
+        op: partial.op ?? inferOp(partial.operation),
+        platform: partial.platform ?? this.platform,
+        measurements: partial.measurements,
+        attributes: partial.attributes
+      };
+      const finalSpan = this.processSpan(spanData);
+      if (!finalSpan) return;
+      this.completedSpans.push(finalSpan);
+      this.flush();
+    } catch {
+    }
+  }
   /** Reset trace context — clears trace ID and span stack. */
   resetTrace() {
     const state = this.state();
@@ -2109,6 +2150,218 @@ function inferOp(operation) {
   if (trimmed.startsWith("db.") || trimmed.includes(".query")) return "db";
   if (trimmed.startsWith("http.") || trimmed.includes("fetch") || trimmed.includes("request")) return "http.client";
   return trimmed.includes(".") ? trimmed.split(".")[0] || trimmed : "custom";
+}
+
+// src/modules/web-vitals.ts
+var WEB_VITAL_OP = "web.vital";
+function isWebVitalsSupported() {
+  return typeof window !== "undefined" && typeof globalThis.PerformanceObserver !== "undefined";
+}
+var WebVitalsModule = class {
+  constructor(tracing, context = {}) {
+    this.observers = [];
+    this.cleanup = [];
+    this.sent = false;
+    this.started = false;
+    this.cls = 0;
+    this.clsObserved = false;
+    this.tracing = tracing;
+    this.context = context;
+  }
+  /**
+   * Begin observing Core Web Vitals. Idempotent and fail-open: a second call is
+   * a no-op, and any error wiring an observer is swallowed so the host page is
+   * never affected. Does nothing outside a browser-with-PerformanceObserver.
+   */
+  start() {
+    if (this.started) return;
+    this.started = true;
+    if (!isWebVitalsSupported()) return;
+    this.collectNavigationTiming();
+    this.observeLcp();
+    this.observeCls();
+    this.observeInp();
+    this.observeFcp();
+    this.installReportHooks();
+  }
+  // ── Observers ──────────────────────────────────────────────────────────────
+  get PO() {
+    return globalThis.PerformanceObserver;
+  }
+  safeObserve(type, handle, extra = { buffered: true }) {
+    const Ctor = this.PO;
+    if (!Ctor) return;
+    try {
+      const observer = new Ctor((list) => {
+        try {
+          handle(list.getEntries());
+        } catch {
+        }
+      });
+      observer.observe({ type, buffered: extra.buffered !== false });
+      this.observers.push(observer);
+    } catch {
+    }
+  }
+  /** LCP = the value of the LAST largest-contentful-paint entry. */
+  observeLcp() {
+    this.safeObserve("largest-contentful-paint", (entries) => {
+      const last = entries[entries.length - 1];
+      if (last && typeof last.startTime === "number") {
+        const value = typeof last.renderTime === "number" && last.renderTime > 0 ? last.renderTime : typeof last.loadTime === "number" && last.loadTime > 0 ? last.loadTime : last.startTime;
+        this.lcp = value;
+      }
+    });
+  }
+  /** CLS = sum of layout-shift values WITHOUT recent user input. */
+  observeCls() {
+    this.safeObserve("layout-shift", (entries) => {
+      for (const entry of entries) {
+        if (!entry.hadRecentInput && typeof entry.value === "number") {
+          this.cls += entry.value;
+          this.clsObserved = true;
+        }
+      }
+    });
+  }
+  /**
+   * INP from `event` timing (max interaction latency), and FID from the first
+   * `first-input` entry as a fallback. INP entries are large, so the browser
+   * requires an explicit `durationThreshold`; we keep the default and read the
+   * worst observed duration.
+   */
+  observeInp() {
+    this.safeObserve("event", (entries) => {
+      for (const entry of entries) {
+        if (typeof entry.duration === "number") {
+          this.inp = this.inp === void 0 ? entry.duration : Math.max(this.inp, entry.duration);
+        }
+      }
+    });
+    this.safeObserve("first-input", (entries) => {
+      const first = entries[0];
+      if (first && typeof first.processingStart === "number" && typeof first.startTime === "number") {
+        this.fid = Math.max(0, first.processingStart - first.startTime);
+      }
+    });
+  }
+  /** FCP from the paint-timing `first-contentful-paint` entry. */
+  observeFcp() {
+    this.safeObserve("paint", (entries) => {
+      for (const entry of entries) {
+        if (entry.name === "first-contentful-paint" && typeof entry.startTime === "number") {
+          this.fcp = entry.startTime;
+        }
+      }
+    });
+  }
+  /**
+   * TTFB (and a fallback FCP) from navigation timing. `responseStart` relative
+   * to the navigation start is TTFB. Read eagerly at start so it is available
+   * even if the navigation entry buffer is empty by report time.
+   */
+  collectNavigationTiming() {
+    try {
+      const perf = globalThis.performance;
+      const navEntries = perf?.getEntriesByType?.("navigation");
+      const nav = navEntries && navEntries[0];
+      if (nav && typeof nav.responseStart === "number" && nav.responseStart >= 0) {
+        this.ttfb = nav.responseStart;
+      } else if (perf?.timing && typeof perf.timing.responseStart === "number") {
+        const t = perf.timing;
+        if (typeof t.navigationStart === "number") {
+          this.ttfb = Math.max(0, t.responseStart - t.navigationStart);
+        }
+      }
+    } catch {
+    }
+  }
+  // ── Report on hide ──────────────────────────────────────────────────────────
+  installReportHooks() {
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+    const onHide = () => this.report();
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        this.report();
+      }
+    };
+    window.addEventListener("pagehide", onHide);
+    this.cleanup.push(() => window.removeEventListener("pagehide", onHide));
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", onVisibility);
+      this.cleanup.push(() => document.removeEventListener("visibilitychange", onVisibility));
+    }
+  }
+  /**
+   * Finalize the collected metrics and emit a single `web.vital` span. Guarded
+   * so it sends at most once (visibilitychange + pagehide can both fire on a
+   * single tab close). Emits nothing when no metric was collected.
+   */
+  report() {
+    if (this.sent) return;
+    this.sent = true;
+    if (this.ttfb === void 0) this.collectNavigationTiming();
+    const measurements = {};
+    const set = (key, value) => {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        measurements[key] = key === "CLS" ? round(value, 4) : Math.round(value);
+      }
+    };
+    set("LCP", this.lcp);
+    if (this.clsObserved) set("CLS", this.cls);
+    set("INP", this.inp ?? this.fid);
+    set("FCP", this.fcp);
+    set("TTFB", this.ttfb);
+    this.disconnectObservers();
+    if (Object.keys(measurements).length === 0) return;
+    this.tracing.emitSpan({
+      operation: WEB_VITAL_OP,
+      op: WEB_VITAL_OP,
+      description: "Core Web Vitals",
+      status: "ok",
+      durationMs: 0,
+      service: this.context.service,
+      environment: this.context.environment,
+      platform: this.context.platform ?? "browser",
+      measurements,
+      attributes: pruneUndefined({
+        "web_vital.report": "page_hide",
+        release: this.context.release,
+        sessionId: this.context.sessionId
+      })
+    });
+  }
+  disconnectObservers() {
+    for (const observer of this.observers) {
+      try {
+        observer.disconnect();
+      } catch {
+      }
+    }
+    this.observers = [];
+  }
+  /** Stop observing and remove report hooks. Best-effort, idempotent. */
+  destroy() {
+    this.disconnectObservers();
+    for (const fn of this.cleanup) {
+      try {
+        fn();
+      } catch {
+      }
+    }
+    this.cleanup = [];
+  }
+};
+function round(value, decimals) {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+function pruneUndefined(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === "string" && v.length > 0) out[k] = v;
+  }
+  return out;
 }
 
 // src/integrations/db/shared.ts
@@ -3719,6 +3972,7 @@ var AllStakClient = class {
     this.offlineQueue = null;
     this.apiKey = "";
     this.offlineFlushCleanup = [];
+    this.webVitals = null;
     this.integrations = {};
     this.sessionReplay = null;
     this.sessionTracker = null;
@@ -3802,6 +4056,16 @@ var AllStakClient = class {
         this.config,
         this.sessionId
       );
+    }
+    if (config.enableWebVitals !== false && isWebVitalsSupported() && !this.isNodeBuild()) {
+      this.webVitals = new WebVitalsModule(this.tracing, {
+        release: config.release,
+        environment: config.environment,
+        service: config.tags?.service,
+        sessionId: this.sessionId,
+        platform: config.platform
+      });
+      this.webVitals.start();
     }
     if (config.enableAutoSessionTracking !== false && !isTestRuntime2()) {
       this.sessionTracker = new SessionTracker(this.config, this.transport, this.sessionId);
@@ -4117,6 +4381,25 @@ var AllStakClient = class {
   getTransportStats() {
     return this.transport.getStats();
   }
+  /**
+   * Start Core Web Vitals collection (browser only). Auto-started at init in the
+   * browser bundle unless `enableWebVitals === false`; call this manually to
+   * (re)arm it after an explicit opt-out, or from a custom integration. A no-op
+   * off-browser and idempotent once collection is running.
+   */
+  startWebVitals() {
+    if (this.isNodeBuild() || !isWebVitalsSupported()) return;
+    if (!this.webVitals) {
+      this.webVitals = new WebVitalsModule(this.tracing, {
+        release: this.config.release,
+        environment: this.config.environment,
+        service: this.config.tags?.service,
+        sessionId: this.sessionId,
+        platform: this.config.platform
+      });
+    }
+    this.webVitals.start();
+  }
   // ------------------------------------------------------------------
   // Distributed Tracing
   // ------------------------------------------------------------------
@@ -4207,6 +4490,7 @@ var AllStakClient = class {
   destroy() {
     this.sessionTracker?.end();
     setTraceResolver(null);
+    this.webVitals?.destroy();
     this.tracing.destroy();
     this.errors.destroy();
     this.httpRequests.destroy();
@@ -4529,6 +4813,14 @@ var AllStak = {
   },
   getSessionId() {
     return ensureInit().getSessionId();
+  },
+  /**
+   * Start Core Web Vitals collection (browser only). Auto-started at init in the
+   * browser unless `enableWebVitals: false` was passed. Call manually to re-arm
+   * after an opt-out. No-op off-browser; idempotent once running.
+   */
+  startWebVitals() {
+    ensureInit().startWebVitals();
   },
   getTransportStats() {
     return ensureInit().getTransportStats();
