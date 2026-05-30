@@ -1,11 +1,12 @@
 /**
- * Automatic breadcrumb instrumentation for fetch and console in browser environments.
+ * Automatic breadcrumb instrumentation for fetch, console, and safe UI clicks
+ * in browser environments.
  *
  * These patches are safe: they only wrap if the globals exist and always
  * delegate to the original implementation.
  */
 import { mergeBaggageValue, normalizeSpanId, normalizeTraceId, type TracePropagationOptions } from './trace-propagation';
-import { scrubStringValue } from '../utils/redact';
+import { redactValue as redactTelemetryValue, scrubStringValue } from '../utils/redact';
 
 type AddBreadcrumbFn = (
   type: string,
@@ -13,6 +14,15 @@ type AddBreadcrumbFn = (
   level?: string,
   data?: Record<string, unknown>,
 ) => void;
+
+export interface AutoBreadcrumb {
+  type: string;
+  message: string;
+  level?: string;
+  data?: Record<string, unknown>;
+}
+
+export type BeforeBreadcrumb = (breadcrumb: AutoBreadcrumb) => AutoBreadcrumb | null | undefined;
 
 type CaptureRequestFn = (item: {
   direction: 'outbound';
@@ -47,6 +57,8 @@ export interface HttpBodyCaptureOptions {
   contentTypes?: string[];
   redactFields?: string[];
 }
+
+const CLICK_FLAG = '__allstak_click_patched__';
 
 /**
  * Wrap `globalThis.fetch` to record HTTP breadcrumbs AND ship the request
@@ -388,4 +400,157 @@ export function instrumentConsole(addBreadcrumb: AddBreadcrumbFn): void {
     addBreadcrumb('log', args.map(String).join(' '), 'error');
     origError.apply(console, args);
   };
+}
+
+export interface ClickBreadcrumbOptions {
+  beforeBreadcrumb?: BeforeBreadcrumb;
+  maxSelectorLength?: number;
+}
+
+/**
+ * Capture privacy-safe click breadcrumbs. The SDK records only a bounded
+ * selector summary (tag/id/classes/role/type), never input values or element
+ * text. The final breadcrumb is redacted before it reaches the SDK buffer so a
+ * custom beforeBreadcrumb hook cannot reintroduce obvious secrets.
+ */
+export function instrumentClicks(
+  addBreadcrumb: AddBreadcrumbFn,
+  options: ClickBreadcrumbOptions = {},
+): void {
+  const doc = (globalThis as any).document;
+  if (!doc || typeof doc.addEventListener !== 'function') return;
+  if ((doc as any)[CLICK_FLAG]) return;
+
+  const maxSelectorLength = Math.max(32, options.maxSelectorLength ?? 160);
+  const handler = (event: Event) => {
+    try {
+      const target = closestClickable((event as any).target);
+      if (!target || isSensitiveClickable(target)) return;
+      const selector = selectorSummary(target, maxSelectorLength);
+      if (!selector) return;
+      const breadcrumb: AutoBreadcrumb = {
+        type: 'ui',
+        message: `click ${selector}`,
+        level: 'info',
+        data: { action: 'click', selector, tag: tagName(target) },
+      };
+      const next = options.beforeBreadcrumb ? options.beforeBreadcrumb(breadcrumb) : breadcrumb;
+      if (!next) return;
+      const safe = sanitizeAutoBreadcrumb(next);
+      addBreadcrumb(safe.type, safe.message, safe.level, safe.data);
+    } catch {
+      /* click instrumentation must never break the app */
+    }
+  };
+
+  doc.addEventListener('click', handler, true);
+  (doc as any)[CLICK_FLAG] = true;
+}
+
+function sanitizeAutoBreadcrumb(breadcrumb: AutoBreadcrumb): AutoBreadcrumb {
+  const safe = redactTelemetryValue(
+    {
+      type: breadcrumb.type,
+      message: breadcrumb.message,
+      level: breadcrumb.level,
+      data: breadcrumb.data,
+    },
+    { scrubValues: true, sendDefaultPii: false },
+  ) as AutoBreadcrumb;
+  return {
+    type: typeof safe.type === 'string' ? safe.type : 'default',
+    message: typeof safe.message === 'string' ? safe.message : '',
+    level: typeof safe.level === 'string' ? safe.level : undefined,
+    data: safe.data && typeof safe.data === 'object' && !Array.isArray(safe.data)
+      ? safe.data as Record<string, unknown>
+      : undefined,
+  };
+}
+
+function closestClickable(target: unknown): Element | null {
+  let el = asElement(target);
+  while (el) {
+    const tag = tagName(el);
+    if (
+      tag === 'button' ||
+      tag === 'a' ||
+      tag === 'input' ||
+      tag === 'select' ||
+      tag === 'textarea' ||
+      attr(el, 'role') === 'button' ||
+      attr(el, 'data-allstak-click') !== null
+    ) {
+      return el;
+    }
+    el = asElement((el as unknown as { parentElement?: unknown }).parentElement);
+  }
+  return asElement(target);
+}
+
+function asElement(value: unknown): Element | null {
+  if (!value || typeof value !== 'object') return null;
+  const maybe = value as { tagName?: unknown; nodeType?: unknown };
+  return typeof maybe.tagName === 'string' || maybe.nodeType === 1 ? value as Element : null;
+}
+
+function isSensitiveClickable(el: Element): boolean {
+  if (tagName(el) !== 'input') return false;
+  const type = (attr(el, 'type') ?? '').toLowerCase();
+  return type === 'password' || type === 'hidden';
+}
+
+function selectorSummary(el: Element, maxLength: number): string {
+  const tag = tagName(el) || 'element';
+  const parts = [tag];
+  const id = cleanSelectorPart(attr(el, 'id'));
+  if (id) parts.push(`#${id}`);
+  const classes = classNames(el).slice(0, 3).map(cleanSelectorPart).filter(Boolean);
+  if (classes.length) parts.push(classes.map((c) => `.${c}`).join(''));
+  const role = cleanSelectorPart(attr(el, 'role'));
+  if (role) parts.push(`[role="${role}"]`);
+  const type = cleanSelectorPart(attr(el, 'type'));
+  if (type && tag === 'input') parts.push(`[type="${type}"]`);
+  return truncateSelector(parts.join(''), maxLength);
+}
+
+function tagName(el: Element): string {
+  return ((el as unknown as { tagName?: string }).tagName ?? '').toLowerCase();
+}
+
+function attr(el: Element, name: string): string | null {
+  try {
+    const getter = (el as unknown as { getAttribute?: (n: string) => string | null }).getAttribute;
+    if (typeof getter === 'function') return getter.call(el, name);
+    const value = (el as unknown as Record<string, unknown>)[name];
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function classNames(el: Element): string[] {
+  try {
+    const list = (el as unknown as { classList?: Iterable<string>; className?: unknown }).classList;
+    if (list) return Array.from(list).filter((v): v is string => typeof v === 'string');
+    const className = (el as unknown as { className?: unknown }).className;
+    return typeof className === 'string' ? className.split(/\s+/).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function cleanSelectorPart(value: string | null): string {
+  if (!value) return '';
+  return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+}
+
+function truncateSelector(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, Math.max(0, maxLength - 12)) + '[truncated]';
+}
+
+/** @internal - for tests. Resets the click wrap-once flag. */
+export function __resetClickInstrumentationFlagForTest(): void {
+  const doc = (globalThis as any).document;
+  if (doc) delete (doc as any)[CLICK_FLAG];
 }

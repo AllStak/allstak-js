@@ -1,4 +1,5 @@
 import { HttpTransport } from '../transport/http';
+import { newTraceId, normalizeSpanId, normalizeTraceId } from './trace-propagation';
 
 export interface HttpRequestItem {
   /** Unique trace identifier — generates one if not provided */
@@ -71,17 +72,6 @@ const INGEST_PATH = '/ingest/v1/http-requests';
 const FLUSH_INTERVAL_MS = 5_000;
 const BATCH_SIZE_THRESHOLD = 20;
 
-function generateTraceId(): string {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
 type OnCaptureBreadcrumb = (item: HttpRequestItem) => void;
 
 export class HttpRequestModule {
@@ -119,10 +109,10 @@ export class HttpRequestModule {
     }
 
     this.queue.push({
-      traceId: item.traceId ?? generateTraceId(),
-      requestId: item.requestId ?? generateTraceId(),
-      spanId: item.spanId,
-      parentSpanId: item.parentSpanId,
+      traceId: item.traceId ? normalizeTraceId(item.traceId) : newTraceId(),
+      requestId: item.requestId ?? newTraceId(),
+      spanId: item.spanId ? normalizeSpanId(item.spanId) : undefined,
+      parentSpanId: item.parentSpanId ? normalizeSpanId(item.parentSpanId) : undefined,
       direction: item.direction,
       method: item.method,
       host: item.host,

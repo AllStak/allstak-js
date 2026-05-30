@@ -8,9 +8,11 @@ import {
   SessionTracker,
   Span,
   WebVitalsModule,
+  __resetClickInstrumentationFlagForTest,
   _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
+  clickIntegration,
   consoleIntegration,
   createOfflineQueue,
   databaseIntegration,
@@ -20,13 +22,14 @@ import {
   eventFiltersIntegration,
   httpClientIntegration,
   inboundFiltersIntegration,
+  instrumentClicks,
   isNodeRuntime,
   isWebVitalsSupported,
   parseGitRelease,
   registerRuntimeRelease,
   setPersistence,
   src_default
-} from "./chunk-DJU4MYVZ.mjs";
+} from "./chunk-Y3JEHE6Y.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 export {
@@ -37,9 +40,11 @@ export {
   SessionTracker,
   Span,
   WebVitalsModule,
+  __resetClickInstrumentationFlagForTest,
   _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
+  clickIntegration,
   consoleIntegration,
   createOfflineQueue,
   databaseIntegration,
@@ -50,6 +55,7 @@ export {
   eventFiltersIntegration,
   httpClientIntegration,
   inboundFiltersIntegration,
+  instrumentClicks,
   isNodeRuntime,
   isWebVitalsSupported,
   parseGitRelease,

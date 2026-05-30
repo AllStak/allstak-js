@@ -1,6 +1,7 @@
-import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-BAE1jk06.js';
-export { O as OfflineQueue, b as OfflineQueueOptions, P as PersistedEvent, c as PersistenceAdapter, d as createOfflineQueue, s as setPersistence } from './database-BAE1jk06.js';
-import { H as HttpBodyCaptureOptions, T as TracePropagationTarget } from './auto-breadcrumbs-DRB0ieVv.js';
+import { H as HttpTransport, D as DatabaseModule, a as DbQueryItem, T as TransportStats } from './database-D1L57LlB.js';
+export { O as OfflineQueue, b as OfflineQueueOptions, P as PersistedEvent, c as PersistenceAdapter, d as createOfflineQueue, s as setPersistence } from './database-D1L57LlB.js';
+import { B as BeforeBreadcrumb, H as HttpBodyCaptureOptions, T as TracePropagationTarget } from './auto-breadcrumbs-CgFR_aOl.js';
+export { A as AutoBreadcrumb, C as ClickBreadcrumbOptions, _ as __resetClickInstrumentationFlagForTest, i as instrumentClicks } from './auto-breadcrumbs-CgFR_aOl.js';
 
 interface ErrorEvent {
     type: 'error';
@@ -320,7 +321,7 @@ declare class TracingModule {
      * Browser builds fall back to the historical global context.
      */
     withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
-    withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+    withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T, parentSpanId?: string): T;
     private state;
     /**
      * Record the sampling decision inherited from an incoming `traceparent`.
@@ -339,10 +340,18 @@ declare class TracingModule {
     getTraceId(): string;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
     setTraceId(traceId: string): void;
+    /**
+     * Continue a validated inbound W3C trace. Unlike setTraceId(), this rejects
+     * malformed IDs and seeds the span stack with the upstream parent span so the
+     * next local span is correctly linked as a child.
+     */
+    continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean;
     getRequestId(): string | null;
     setRequestId(requestId: string): void;
     /** Get the current active span ID (top of the span stack), or null. */
     getCurrentSpanId(): string | null;
+    getCurrentTraceId(): string | null;
+    getActiveSpanCount(): number;
     /**
      * Start a new span. The span is automatically parented to the current
      * active span (if any). Call span.finish() when the operation completes.
@@ -542,6 +551,14 @@ interface ScreenshotCaptureOptions {
         requestId?: string;
     }) => ScreenshotArtifact | null | undefined | Promise<ScreenshotArtifact | null | undefined>;
 }
+interface SdkDiagnostics {
+    transport: TransportStats;
+    breadcrumbs: number;
+    sessionId: string;
+    activeTraceCount: number;
+    activeSpanCount: number;
+    queueSize: number;
+}
 interface AllStakConfig extends ReleaseMetadata {
     /**
      * Project API key from the AllStak dashboard (`ask_live_…`).
@@ -723,6 +740,15 @@ interface AllStakConfig extends ReleaseMetadata {
     integrations?: IntegrationOption;
     /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
     autoBreadcrumbs?: boolean;
+    /**
+     * Enable privacy-safe browser click breadcrumbs. Default: true when
+     * `autoBreadcrumbs` is enabled and `document.addEventListener` exists.
+     */
+    autoBreadcrumbsClick?: boolean;
+    /** Mutate or drop auto-captured click breadcrumbs before they are buffered. */
+    beforeBreadcrumb?: BeforeBreadcrumb;
+    /** Maximum selector length for click breadcrumbs. Default: 160, minimum: 32. */
+    clickBreadcrumbMaxSelectorLength?: number;
     /** Enable automatic database instrumentation for pg and mysql2. Default: true */
     autoDbInstrumentation?: boolean;
     /** Enable automatic capture of Node uncaughtException + unhandledRejection. Default: true */
@@ -908,6 +934,7 @@ declare class AllStakClient {
     }): void;
     getSessionId(): string;
     getTransportStats(): TransportStats;
+    getDiagnostics(): SdkDiagnostics;
     /**
      * Start Core Web Vitals collection (browser only). Auto-started at init in the
      * browser bundle unless `enableWebVitals === false`; call this manually to
@@ -928,13 +955,15 @@ declare class AllStakClient {
     trace<T>(operation: string, callback: (span: Span) => T, options?: SpanOptions): T;
     /** @internal Used by server framework integrations to isolate request tracing. */
     withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
-    withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+    withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T, parentSpanId?: string): T;
     /** Get the current trace ID (creates one if none exists). */
     getTraceId(): string;
     /** Get the current request ID, when inside a server framework request context. */
     getRequestId(): string | null;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
     setTraceId(traceId: string): void;
+    /** Continue a valid inbound W3C trace with the upstream span as parent. */
+    continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean;
     /** Get the current active span ID, or null if no span is active. */
     getCurrentSpanId(): string | null;
     /**
@@ -1108,6 +1137,11 @@ declare const inboundFiltersIntegration: () => {
 declare const dedupeIntegration: () => {
     name: string;
     processEvent(event: ErrorIngestPayload, client: AllStakClient): ErrorIngestPayload | null;
+};
+
+declare const clickIntegration: () => {
+    name: string;
+    setup(client: AllStakClient): void;
 };
 
 declare const consoleIntegration: () => {
@@ -1289,6 +1323,7 @@ declare const AllStak: {
      */
     flush(timeoutMs?: number): Promise<boolean>;
     close(): void;
+    getDiagnostics(): SdkDiagnostics | null;
     /**
      * Run `callback` with a fresh, temporary {@link Scope} that isolates any
      * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for
@@ -1318,6 +1353,8 @@ declare const AllStak: {
     getTraceId(): string;
     /** Set the trace ID explicitly (e.g. from an incoming request header). */
     setTraceId(traceId: string): void;
+    /** Continue a valid inbound W3C trace with the upstream span as parent. */
+    continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean;
     /** Get the current active span ID, or null if no span is active. */
     getCurrentSpanId(): string | null;
     /** Reset trace context (trace ID and span stack). */
@@ -1327,4 +1364,4 @@ declare const AllStak: {
     _getInstance(): AllStakClient | null;
 };
 
-export { AllStak, type AllStakConfig, type AllStakIntegration, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, Session, type SessionStatus, SessionTracker, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, type WebVitalsContext, WebVitalsModule, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, isWebVitalsSupported, parseGitRelease, registerRuntimeRelease };
+export { AllStak, type AllStakConfig, type AllStakIntegration, BeforeBreadcrumb, type Breadcrumb, type DOMEvent, DatabaseModule, DbQueryItem, type ErrorEvent, type ErrorEventProcessor, type ErrorIngestPayload, type EventFilterPattern, type GitRunner, type HeartbeatOptions, type HttpRequestItem, type IntegrationIndex, type IntegrationOption, type LogEvent, type LogLevel, type RegisterRuntimeReleaseOptions, type ReplayEvent, type SamplingContext, Scope, type ScreenshotArtifact, type ScreenshotCaptureOptions, type SdkDiagnostics, Session, type SessionStatus, SessionTracker, Span, type SpanData, type SpanFilterPattern, type SpanOptions, type SpanProcessor, type TracesSampler, TransportStats, type WebVitalsContext, WebVitalsModule, _resetRuntimeReleaseRegistrationForTest, applyReleaseAutodetect, canRegisterRuntimeRelease, clickIntegration, consoleIntegration, databaseIntegration, dedupeIntegration, AllStak as default, defineIntegration, detectGitRelease, eventFiltersIntegration, httpClientIntegration, inboundFiltersIntegration, isNodeRuntime, isWebVitalsSupported, parseGitRelease, registerRuntimeRelease };

@@ -111,6 +111,8 @@ interface TransportStats {
     sent: number;
     failed: number;
     dropped: number;
+    retryAttempts: number;
+    rateLimited: number;
     consecutiveFailures: number;
     circuitOpenUntil: number;
     lastTransportLatencyMs?: number;
@@ -119,6 +121,12 @@ interface TransportStats {
     persisted?: number;
     /** Events re-sent from the persistent store on init. */
     replayed?: number;
+    /** Payloads gzip-compressed before send. */
+    compressed?: number;
+    /** Payloads sent without compression. */
+    uncompressed?: number;
+    /** Approximate bytes saved by compression. */
+    compressionBytesSaved?: number;
 }
 declare class HttpTransport {
     private baseUrl;
@@ -131,10 +139,15 @@ declare class HttpTransport {
     private sent;
     private failed;
     private dropped;
+    private retryAttempts;
+    private rateLimited;
     private lastTransportLatencyMs;
     private lastFlushDurationMs;
     private persisted;
     private replayed;
+    private compressed;
+    private uncompressed;
+    private compressionBytesSaved;
     private retryTimer;
     private retryTimerDueAt;
     private pendingRetryDelayMs;
@@ -208,6 +221,7 @@ declare class HttpTransport {
     persistOne(item: Pending, countDropOnSkip?: boolean): void;
     flush(timeoutMs?: number): Promise<boolean>;
     noteDropped(count?: number): void;
+    private prepareRequestBody;
     getStats(): TransportStats;
 }
 

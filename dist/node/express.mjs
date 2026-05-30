@@ -2,9 +2,11 @@ import { createRequire as __allstakCreateRequire } from 'node:module';
 const require = __allstakCreateRequire(import.meta.url);
 import {
   AllStak,
+  isValidTraceId,
+  parseTraceparent,
   redactHeaderRecord,
   redactValue
-} from "./chunk-DJU4MYVZ.mjs";
+} from "./chunk-Y3JEHE6Y.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 
@@ -76,8 +78,10 @@ var allstakExpress = {
         res.setHeader?.("x-allstak-request-id", requestId);
       } catch {
       }
-      const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
-      const upstreamSampled = sampledFromTraceparent(firstHeader(req.headers["traceparent"]));
+      const upstream = parseTraceparent(firstHeader(req.headers["traceparent"]));
+      const upstreamTrace = upstream?.traceId ?? validTraceHeader(firstHeader(req.headers["x-allstak-trace-id"])) ?? validTraceHeader(firstHeader(req.headers["x-trace-id"]));
+      const upstreamParentSpanId = upstream?.parentSpanId;
+      const upstreamSampled = upstream?.sampled;
       sdk.withTraceContext(upstreamTrace, requestId, () => {
         sdk.setParentSampled(upstreamSampled);
         const traceId = sdk.getTraceId();
@@ -116,6 +120,7 @@ var allstakExpress = {
               traceId,
               requestId,
               spanId: rootSpan?.spanId,
+              parentSpanId: upstreamParentSpanId,
               direction: "inbound",
               method,
               host,
@@ -151,7 +156,7 @@ var allstakExpress = {
         res.on("finish", finalize);
         res.on("close", finalize);
         next();
-      });
+      }, upstreamParentSpanId);
     };
   },
   /**
@@ -201,16 +206,9 @@ function firstHeader(value) {
   if (Array.isArray(value)) return value[0];
   return value;
 }
-function traceIdFromTraceparent(header) {
-  if (!header) return void 0;
-  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
-  return match?.[1];
-}
-function sampledFromTraceparent(header) {
-  if (!header) return void 0;
-  const match = /^00-[0-9a-f]{32}-[0-9a-f]{16}-([0-9a-f]{2})$/i.exec(header.trim());
-  if (!match) return void 0;
-  return (parseInt(match[1], 16) & 1) === 1;
+function validTraceHeader(header) {
+  const value = header?.trim().toLowerCase();
+  return isValidTraceId(value) ? value : void 0;
 }
 function generateRequestId() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();

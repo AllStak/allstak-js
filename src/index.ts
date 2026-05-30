@@ -10,7 +10,7 @@ import type { DbQueryItem } from './modules/database';
 import type { DatabaseModule } from './modules/database';
 import type { AllStakIntegration } from './integration';
 
-export type { AllStakConfig, ScreenshotArtifact, ScreenshotCaptureOptions } from './client';
+export type { AllStakConfig, ScreenshotArtifact, ScreenshotCaptureOptions, SdkDiagnostics } from './client';
 export { applyReleaseAutodetect } from './client';
 export { parseGitRelease, detectGitRelease, isNodeRuntime } from './release-detect';
 export type { GitRunner } from './release-detect';
@@ -28,9 +28,17 @@ export type { AllStakIntegration, IntegrationIndex, IntegrationOption } from './
 export { defineIntegration } from './integration';
 export { eventFiltersIntegration, inboundFiltersIntegration } from './integrations/event-filters';
 export { dedupeIntegration } from './integrations/dedupe';
+export { clickIntegration } from './integrations/click';
 export { consoleIntegration } from './integrations/console';
 export { httpClientIntegration } from './integrations/http-client';
 export { databaseIntegration } from './integrations/database';
+export {
+  instrumentClicks,
+  __resetClickInstrumentationFlagForTest,
+  type AutoBreadcrumb,
+  type BeforeBreadcrumb,
+  type ClickBreadcrumbOptions,
+} from './modules/auto-breadcrumbs';
 export type { TransportStats } from './transport/http';
 export type { ErrorEvent, Breadcrumb, ErrorEventProcessor, EventFilterPattern, ErrorIngestPayload } from './modules/errors';
 export type { LogEvent, LogLevel } from './modules/logs';
@@ -196,6 +204,10 @@ export const AllStak = {
     instance = null;
   },
 
+  getDiagnostics(): import('./client').SdkDiagnostics | null {
+    return instance?.getDiagnostics() ?? null;
+  },
+
   /**
    * Run `callback` with a fresh, temporary {@link Scope} that isolates any
    * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for
@@ -264,6 +276,11 @@ export const AllStak = {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId: string): void {
     ensureInit().setTraceId(traceId);
+  },
+
+  /** Continue a valid inbound W3C trace with the upstream span as parent. */
+  continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean {
+    return ensureInit().continueTrace(traceId, parentSpanId, sampled);
   },
 
   /** Get the current active span ID, or null if no span is active. */

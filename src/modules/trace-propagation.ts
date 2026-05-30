@@ -7,12 +7,90 @@
  */
 import type { TracePropagationTarget } from './auto-breadcrumbs';
 
+const TRACE_ID_RE = /^[0-9a-f]{32}$/;
+const SPAN_ID_RE = /^[0-9a-f]{16}$/;
+const ZERO_TRACE_ID_RE = /^0{32}$/;
+const ZERO_SPAN_ID_RE = /^0{16}$/;
+
+function randomHex(byteLength: number): string {
+  const g = globalThis as { crypto?: { getRandomValues?: (array: Uint8Array) => Uint8Array } };
+  if (g.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(byteLength);
+    g.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return Array.from({ length: byteLength * 2 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+}
+
+export function newTraceId(): string {
+  let id = randomHex(16).toLowerCase();
+  if (ZERO_TRACE_ID_RE.test(id)) id = `1${id.slice(1)}`;
+  return id;
+}
+
+export function newSpanId(): string {
+  let id = randomHex(8).toLowerCase();
+  if (ZERO_SPAN_ID_RE.test(id)) id = `1${id.slice(1)}`;
+  return id;
+}
+
+function hexOnly(value: string): string {
+  return value.replace(/[^0-9a-f]/gi, '').toLowerCase();
+}
+
+export function isValidTraceId(traceId: string | undefined): traceId is string {
+  return !!traceId && TRACE_ID_RE.test(traceId) && !ZERO_TRACE_ID_RE.test(traceId);
+}
+
+export function isValidSpanId(spanId: string | undefined): spanId is string {
+  return !!spanId && SPAN_ID_RE.test(spanId) && !ZERO_SPAN_ID_RE.test(spanId);
+}
+
 export function normalizeTraceId(traceId: string): string {
-  return traceId.replace(/-/g, '').slice(0, 32).padEnd(32, '0');
+  const hex = hexOnly(traceId);
+  if (hex.length === 32 && !ZERO_TRACE_ID_RE.test(hex)) return hex;
+  if (hex.length > 32) {
+    const sliced = hex.slice(0, 32);
+    return ZERO_TRACE_ID_RE.test(sliced) ? newTraceId() : sliced;
+  }
+  if (hex.length > 0) {
+    const padded = hex.padEnd(32, '0');
+    return ZERO_TRACE_ID_RE.test(padded) ? newTraceId() : padded;
+  }
+  return newTraceId();
 }
 
 export function normalizeSpanId(spanId: string): string {
-  return spanId.replace(/-/g, '').slice(0, 16).padEnd(16, '0');
+  const hex = hexOnly(spanId);
+  if (hex.length === 16 && !ZERO_SPAN_ID_RE.test(hex)) return hex;
+  if (hex.length > 16) {
+    const sliced = hex.slice(0, 16);
+    return ZERO_SPAN_ID_RE.test(sliced) ? newSpanId() : sliced;
+  }
+  if (hex.length > 0) {
+    const padded = hex.padEnd(16, '0');
+    return ZERO_SPAN_ID_RE.test(padded) ? newSpanId() : padded;
+  }
+  return newSpanId();
+}
+
+export interface ParsedTraceparent {
+  traceId: string;
+  parentSpanId: string;
+  sampled: boolean;
+}
+
+export function parseTraceparent(header: string | undefined): ParsedTraceparent | undefined {
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec((header ?? '').trim());
+  if (!match) return undefined;
+  const traceId = match[1].toLowerCase();
+  const parentSpanId = match[2].toLowerCase();
+  if (!isValidTraceId(traceId) || !isValidSpanId(parentSpanId)) return undefined;
+  return {
+    traceId,
+    parentSpanId,
+    sampled: (parseInt(match[3], 16) & 0x01) === 0x01,
+  };
 }
 
 /** Merge incoming AllStak baggage members into an existing baggage string, preserving vendor members. */
@@ -56,15 +134,16 @@ export function tracePropagationValues(
   const sampled = options?.sampled !== false; // default: sampled (back-compat)
   // Prefer the active span id when one exists; otherwise derive from requestId.
   const rawSpanId = options?.spanId && options.spanId.length > 0 ? options.spanId : requestId;
-  const spanId = normalizeSpanId(rawSpanId.replace(/-/g, ''));
+  const wireTraceId = normalizeTraceId(traceId);
+  const spanId = normalizeSpanId(rawSpanId);
   const flag = sampled ? '01' : '00';
-  const traceparent = `00-${normalizeTraceId(traceId)}-${spanId}-${flag}`;
+  const traceparent = `00-${wireTraceId}-${spanId}-${flag}`;
   const baggage = [
-    `allstak-trace_id=${encodeURIComponent(traceId)}`,
+    `allstak-trace_id=${encodeURIComponent(wireTraceId)}`,
     `allstak-span_id=${encodeURIComponent(spanId)}`,
     `allstak-request_id=${encodeURIComponent(requestId)}`,
   ].join(',');
-  return { traceparent, allstakTrace: `${traceId}-${spanId}-${sampled ? '1' : '0'}`, baggage, traceId, requestId };
+  return { traceparent, allstakTrace: `${wireTraceId}-${spanId}-${sampled ? '1' : '0'}`, baggage, traceId: wireTraceId, requestId };
 }
 
 type HeaderBag = Record<string, unknown>;

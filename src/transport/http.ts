@@ -12,6 +12,7 @@ const FAILURE_THRESHOLD = 3;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 30_000;
 const RETRY_AFTER_MAX_MS = 300_000;
+const COMPRESSION_THRESHOLD_BYTES = 1024;
 
 /**
  * A unit of work in the transport. `persistId` is set once the item has been
@@ -41,6 +42,8 @@ export interface TransportStats {
   sent: number;
   failed: number;
   dropped: number;
+  retryAttempts: number;
+  rateLimited: number;
   consecutiveFailures: number;
   circuitOpenUntil: number;
   lastTransportLatencyMs?: number;
@@ -49,6 +52,12 @@ export interface TransportStats {
   persisted?: number;
   /** Events re-sent from the persistent store on init. */
   replayed?: number;
+  /** Payloads gzip-compressed before send. */
+  compressed?: number;
+  /** Payloads sent without compression. */
+  uncompressed?: number;
+  /** Approximate bytes saved by compression. */
+  compressionBytesSaved?: number;
 }
 
 export class HttpTransport {
@@ -60,10 +69,15 @@ export class HttpTransport {
   private sent = 0;
   private failed = 0;
   private dropped = 0;
+  private retryAttempts = 0;
+  private rateLimited = 0;
   private lastTransportLatencyMs: number | undefined;
   private lastFlushDurationMs: number | undefined;
   private persisted = 0;
   private replayed = 0;
+  private compressed = 0;
+  private uncompressed = 0;
+  private compressionBytesSaved = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimerDueAt = 0;
   private pendingRetryDelayMs = 0;
@@ -163,6 +177,7 @@ export class HttpTransport {
    */
   private onSendFailure(item: Pending, err: unknown): void {
     this.failed++;
+    if (err instanceof HttpResponseError && err.status === 429) this.rateLimited++;
     const retryDelay = this.recordFailure(err);
     if (isPermanentFailure(err)) {
       this.dropped++;
@@ -184,6 +199,7 @@ export class HttpTransport {
     // copy protects against tab/process death before the next retry fires.
     this.persistOne(item, false);
     this.bufferOrPersist(item);
+    this.retryAttempts++;
     this.scheduleFlush(retryDelay);
   }
 
@@ -191,6 +207,8 @@ export class HttpTransport {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
     const started = Date.now();
+    const bodyJson = JSON.stringify(payload);
+    const body = await this.prepareRequestBody(bodyJson);
 
     try {
       const res = await fetch(url, {
@@ -198,8 +216,9 @@ export class HttpTransport {
         headers: {
           'Content-Type': 'application/json',
           'X-AllStak-Key': this.apiKey,
+          ...body.headers,
         },
-        body: JSON.stringify(payload),
+        body: body.body,
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -413,19 +432,91 @@ export class HttpTransport {
     this.dropped += Math.max(0, count);
   }
 
+  private async prepareRequestBody(bodyJson: string): Promise<PreparedBody> {
+    const rawBytes = byteLength(bodyJson);
+    if (rawBytes < COMPRESSION_THRESHOLD_BYTES) {
+      this.uncompressed++;
+      return { body: bodyJson, headers: {} };
+    }
+
+    const compressed = await gzipBody(bodyJson);
+    if (!compressed || compressed.byteLength >= rawBytes) {
+      this.uncompressed++;
+      return { body: bodyJson, headers: {} };
+    }
+
+    this.compressed++;
+    this.compressionBytesSaved += rawBytes - compressed.byteLength;
+    return {
+      body: compressed as unknown as BodyInit,
+      headers: { 'Content-Encoding': 'gzip' },
+    };
+  }
+
   getStats(): TransportStats {
     return {
       queued: this.buffer.size,
       sent: this.sent,
       failed: this.failed,
       dropped: this.dropped,
+      retryAttempts: this.retryAttempts,
+      rateLimited: this.rateLimited,
       consecutiveFailures: this.consecutiveFailures,
       circuitOpenUntil: this.circuitOpenUntil,
       lastTransportLatencyMs: this.lastTransportLatencyMs,
       lastFlushDurationMs: this.lastFlushDurationMs,
       persisted: this.persisted,
       replayed: this.replayed,
+      compressed: this.compressed,
+      uncompressed: this.uncompressed,
+      compressionBytesSaved: this.compressionBytesSaved,
     };
+  }
+}
+
+function byteLength(value: string): number {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).byteLength;
+  return value.length;
+}
+
+type PreparedBody = {
+  body: BodyInit;
+  headers: Record<string, string>;
+};
+
+async function gzipBody(bodyJson: string): Promise<Uint8Array | null> {
+  const compressionStream = (globalThis as any).CompressionStream;
+  if (typeof compressionStream === 'function' && typeof Blob !== 'undefined' && typeof Response !== 'undefined') {
+    try {
+      const stream = new Blob([bodyJson], { type: 'application/json' })
+        .stream()
+        .pipeThrough(new compressionStream('gzip'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const proc = (globalThis as any).process;
+    const zlib = proc?.getBuiltinModule?.('node:zlib') ??
+      optionalRequire('node:zlib') ??
+      optionalRequire('zlib') ??
+      (proc?.versions?.node ? await import('node:zlib').catch(() => null) : null);
+    const compressed = zlib?.gzipSync?.(bodyJson);
+    return compressed ? new Uint8Array(compressed) : null;
+  } catch {
+    return null;
+  }
+}
+
+function optionalRequire(id: string): any | null {
+  try {
+    // eslint-disable-next-line no-new-func
+    const req = Function('return typeof require === "function" ? require : undefined')();
+    return typeof req === 'function' ? req(id) : null;
+  } catch {
+    return null;
   }
 }
 

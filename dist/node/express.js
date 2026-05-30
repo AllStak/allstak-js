@@ -1,7 +1,9 @@
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -15,6 +17,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/integrations/express.ts
@@ -400,6 +410,7 @@ var FAILURE_THRESHOLD = 3;
 var BACKOFF_BASE_MS = 500;
 var BACKOFF_MAX_MS = 3e4;
 var RETRY_AFTER_MAX_MS = 3e5;
+var COMPRESSION_THRESHOLD_BYTES = 1024;
 var HttpResponseError = class extends Error {
   constructor(status, retryAfter) {
     super(`HTTP ${status}`);
@@ -420,8 +431,13 @@ var HttpTransport = class {
     this.sent = 0;
     this.failed = 0;
     this.dropped = 0;
+    this.retryAttempts = 0;
+    this.rateLimited = 0;
     this.persisted = 0;
     this.replayed = 0;
+    this.compressed = 0;
+    this.uncompressed = 0;
+    this.compressionBytesSaved = 0;
     this.retryTimer = null;
     this.retryTimerDueAt = 0;
     this.pendingRetryDelayMs = 0;
@@ -493,6 +509,7 @@ var HttpTransport = class {
    */
   onSendFailure(item, err) {
     this.failed++;
+    if (err instanceof HttpResponseError && err.status === 429) this.rateLimited++;
     const retryDelay = this.recordFailure(err);
     if (isPermanentFailure(err)) {
       this.dropped++;
@@ -510,20 +527,24 @@ var HttpTransport = class {
     }
     this.persistOne(item, false);
     this.bufferOrPersist(item);
+    this.retryAttempts++;
     this.scheduleFlush(retryDelay);
   }
   async doFetch(url, payload) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
     const started = Date.now();
+    const bodyJson = JSON.stringify(payload);
+    const body = await this.prepareRequestBody(bodyJson);
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-AllStak-Key": this.apiKey
+          "X-AllStak-Key": this.apiKey,
+          ...body.headers
         },
-        body: JSON.stringify(payload),
+        body: body.body,
         signal: controller.signal
       });
       clearTimeout(timeoutId);
@@ -710,21 +731,75 @@ var HttpTransport = class {
   noteDropped(count = 1) {
     this.dropped += Math.max(0, count);
   }
+  async prepareRequestBody(bodyJson) {
+    const rawBytes = byteLength(bodyJson);
+    if (rawBytes < COMPRESSION_THRESHOLD_BYTES) {
+      this.uncompressed++;
+      return { body: bodyJson, headers: {} };
+    }
+    const compressed = await gzipBody(bodyJson);
+    if (!compressed || compressed.byteLength >= rawBytes) {
+      this.uncompressed++;
+      return { body: bodyJson, headers: {} };
+    }
+    this.compressed++;
+    this.compressionBytesSaved += rawBytes - compressed.byteLength;
+    return {
+      body: compressed,
+      headers: { "Content-Encoding": "gzip" }
+    };
+  }
   getStats() {
     return {
       queued: this.buffer.size,
       sent: this.sent,
       failed: this.failed,
       dropped: this.dropped,
+      retryAttempts: this.retryAttempts,
+      rateLimited: this.rateLimited,
       consecutiveFailures: this.consecutiveFailures,
       circuitOpenUntil: this.circuitOpenUntil,
       lastTransportLatencyMs: this.lastTransportLatencyMs,
       lastFlushDurationMs: this.lastFlushDurationMs,
       persisted: this.persisted,
-      replayed: this.replayed
+      replayed: this.replayed,
+      compressed: this.compressed,
+      uncompressed: this.uncompressed,
+      compressionBytesSaved: this.compressionBytesSaved
     };
   }
 };
+function byteLength(value) {
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(value).byteLength;
+  return value.length;
+}
+async function gzipBody(bodyJson) {
+  const compressionStream = globalThis.CompressionStream;
+  if (typeof compressionStream === "function" && typeof Blob !== "undefined" && typeof Response !== "undefined") {
+    try {
+      const stream = new Blob([bodyJson], { type: "application/json" }).stream().pipeThrough(new compressionStream("gzip"));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const proc = globalThis.process;
+    const zlib = proc?.getBuiltinModule?.("node:zlib") ?? optionalRequire("node:zlib") ?? optionalRequire("zlib") ?? (proc?.versions?.node ? await import("zlib").catch(() => null) : null);
+    const compressed = zlib?.gzipSync?.(bodyJson);
+    return compressed ? new Uint8Array(compressed) : null;
+  } catch {
+    return null;
+  }
+}
+function optionalRequire(id) {
+  try {
+    const req = Function('return typeof require === "function" ? require : undefined')();
+    return typeof req === "function" ? req(id) : null;
+  } catch {
+    return null;
+  }
+}
 function isPermanentFailure(error) {
   if (!(error instanceof HttpResponseError)) return false;
   return error.status >= 400 && error.status < 500 && error.status !== 429;
@@ -871,20 +946,28 @@ var DEFAULT_REDACTED_KEY_PATTERNS = [
   /(^|\.)authorization$/i,
   /(^|\.)proxy-authorization$/i,
   /(^|\.)cookie$/i,
+  /cookie$/i,
   /(^|\.)set-cookie$/i,
+  /set[._-]?cookie$/i,
   /(^|\.)x-api-key$/i,
   /(^|\.)x-auth-token$/i,
   /(^|\.)x-access-token$/i,
   /(^|\.)x-allstak-key$/i,
   /(^|[._-])token$/i,
+  /token$/i,
   /(^|[._-])api[._-]?key$/i,
   /(^|[._-])password$/i,
+  /password$/i,
   /(^|[._-])passwd$/i,
+  /passwd$/i,
   /(^|[._-])secret$/i,
+  /secret$/i,
   /(^|[._-])session[._-]?id$/i,
   /(^|[._-])csrf$/i,
   /(^|[._-])jwt$/i,
-  /(^|[._-])bearer$/i
+  /jwt$/i,
+  /(^|[._-])bearer$/i,
+  /bearer$/i
 ];
 var DEFAULT_MAX_DEPTH = 12;
 function isSensitiveKey(key, extra = []) {
@@ -1165,6 +1248,7 @@ var ErrorModule = class {
     this.onUnhandledRejectionHandler = null;
     this.breadcrumbs = [];
     this.eventProcessors = [];
+    this.pendingPipelines = /* @__PURE__ */ new Set();
     /**
      * Optional hook invoked when the browser autocapture observes an UNHANDLED
      * error/rejection. The client wires this to mark the release-health session
@@ -1199,6 +1283,9 @@ var ErrorModule = class {
   }
   clearBreadcrumbs() {
     this.breadcrumbs = [];
+  }
+  getBreadcrumbCount() {
+    return this.breadcrumbs.length;
   }
   /**
    * Build the release-metadata block we attach to every event. Backend stores
@@ -1288,7 +1375,7 @@ var ErrorModule = class {
       requestContext: requestCtx,
       fingerprint: this.config.fingerprint
     };
-    this.sendThroughPipeline(payload);
+    this.enqueuePipeline(payload);
   }
   captureMessage(message, level = "info", options) {
     if (!this.passesSampleRate()) return;
@@ -1311,7 +1398,19 @@ var ErrorModule = class {
       requestContext: browserRequestContext(),
       fingerprint: this.config.fingerprint
     };
-    this.sendThroughPipeline(payload);
+    this.enqueuePipeline(payload);
+  }
+  async flush(timeoutMs = 2e3) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pendingPipelines.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await Promise.race([
+        Promise.allSettled(Array.from(this.pendingPipelines)),
+        new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining)))
+      ]);
+    }
+    return true;
   }
   // ── Filtering / control ─────────────────────────────────────────────
   passesSampleRate() {
@@ -1366,6 +1465,11 @@ var ErrorModule = class {
     final = this.sanitizeForWire(final);
     if (!final) return;
     this.transport.send(INGEST_PATH, final);
+  }
+  enqueuePipeline(payload) {
+    const pending = this.sendThroughPipeline(payload).catch(() => void 0);
+    this.pendingPipelines.add(pending);
+    pending.finally(() => this.pendingPipelines.delete(pending)).catch(() => void 0);
   }
   sanitizeForWire(payload) {
     const extraKeys = this.config.redactKeys;
@@ -1755,20 +1859,141 @@ var SessionReplayModule = class {
   }
 };
 
-// src/modules/http-requests.ts
-var INGEST_PATH4 = "/ingest/v1/http-requests";
-var FLUSH_INTERVAL_MS2 = 5e3;
-var BATCH_SIZE_THRESHOLD2 = 20;
-function generateTraceId() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
+// src/modules/trace-propagation.ts
+var TRACE_ID_RE = /^[0-9a-f]{32}$/;
+var SPAN_ID_RE = /^[0-9a-f]{16}$/;
+var ZERO_TRACE_ID_RE = /^0{32}$/;
+var ZERO_SPAN_ID_RE = /^0{16}$/;
+function randomHex(byteLength2) {
+  const g = globalThis;
+  if (g.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(byteLength2);
+    g.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   }
+  return Array.from({ length: byteLength2 * 2 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+}
+function newTraceId() {
+  let id = randomHex(16).toLowerCase();
+  if (ZERO_TRACE_ID_RE.test(id)) id = `1${id.slice(1)}`;
+  return id;
+}
+function newSpanId() {
+  let id = randomHex(8).toLowerCase();
+  if (ZERO_SPAN_ID_RE.test(id)) id = `1${id.slice(1)}`;
+  return id;
+}
+function hexOnly(value) {
+  return value.replace(/[^0-9a-f]/gi, "").toLowerCase();
+}
+function isValidTraceId(traceId) {
+  return !!traceId && TRACE_ID_RE.test(traceId) && !ZERO_TRACE_ID_RE.test(traceId);
+}
+function isValidSpanId(spanId) {
+  return !!spanId && SPAN_ID_RE.test(spanId) && !ZERO_SPAN_ID_RE.test(spanId);
+}
+function normalizeTraceId(traceId) {
+  const hex = hexOnly(traceId);
+  if (hex.length === 32 && !ZERO_TRACE_ID_RE.test(hex)) return hex;
+  if (hex.length > 32) {
+    const sliced = hex.slice(0, 32);
+    return ZERO_TRACE_ID_RE.test(sliced) ? newTraceId() : sliced;
+  }
+  if (hex.length > 0) {
+    const padded = hex.padEnd(32, "0");
+    return ZERO_TRACE_ID_RE.test(padded) ? newTraceId() : padded;
+  }
+  return newTraceId();
+}
+function normalizeSpanId(spanId) {
+  const hex = hexOnly(spanId);
+  if (hex.length === 16 && !ZERO_SPAN_ID_RE.test(hex)) return hex;
+  if (hex.length > 16) {
+    const sliced = hex.slice(0, 16);
+    return ZERO_SPAN_ID_RE.test(sliced) ? newSpanId() : sliced;
+  }
+  if (hex.length > 0) {
+    const padded = hex.padEnd(16, "0");
+    return ZERO_SPAN_ID_RE.test(padded) ? newSpanId() : padded;
+  }
+  return newSpanId();
+}
+function parseTraceparent(header) {
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec((header ?? "").trim());
+  if (!match) return void 0;
+  const traceId = match[1].toLowerCase();
+  const parentSpanId = match[2].toLowerCase();
+  if (!isValidTraceId(traceId) || !isValidSpanId(parentSpanId)) return void 0;
+  return {
+    traceId,
+    parentSpanId,
+    sampled: (parseInt(match[3], 16) & 1) === 1
+  };
+}
+function mergeBaggageValue(existing, baggage) {
+  const preserved = existing.split(",").map((part) => part.trim()).filter((part) => part && !part.toLowerCase().startsWith("allstak-"));
+  return [...preserved, ...baggage.split(",")].join(",");
+}
+function tracePropagationValues(traceId, requestId, options) {
+  const sampled = options?.sampled !== false;
+  const rawSpanId = options?.spanId && options.spanId.length > 0 ? options.spanId : requestId;
+  const wireTraceId = normalizeTraceId(traceId);
+  const spanId = normalizeSpanId(rawSpanId);
+  const flag = sampled ? "01" : "00";
+  const traceparent = `00-${wireTraceId}-${spanId}-${flag}`;
+  const baggage = [
+    `allstak-trace_id=${encodeURIComponent(wireTraceId)}`,
+    `allstak-span_id=${encodeURIComponent(spanId)}`,
+    `allstak-request_id=${encodeURIComponent(requestId)}`
+  ].join(",");
+  return { traceparent, allstakTrace: `${wireTraceId}-${spanId}-${sampled ? "1" : "0"}`, baggage, traceId: wireTraceId, requestId };
+}
+function findKey(headers, name) {
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lower) return key;
+  }
+  return void 0;
+}
+function setIfMissing(headers, name, value) {
+  if (!findKey(headers, name)) headers[name] = value;
+}
+function mergeBaggageInto(headers, name, baggage) {
+  const key = findKey(headers, name);
+  if (!key) {
+    headers[name] = baggage;
+    return;
+  }
+  const existing = headers[key];
+  const existingStr = Array.isArray(existing) ? existing.join(",") : String(existing ?? "");
+  headers[key] = mergeBaggageValue(existingStr, baggage);
+}
+function applyTracePropagationToHeaders(headers, traceId, requestId, options) {
+  const p = tracePropagationValues(traceId, requestId, options);
+  setIfMissing(headers, "traceparent", p.traceparent);
+  setIfMissing(headers, "allstak-trace", p.allstakTrace);
+  mergeBaggageInto(headers, "allstak-baggage", p.baggage);
+  mergeBaggageInto(headers, "baggage", p.baggage);
+  setIfMissing(headers, "x-allstak-trace-id", p.traceId);
+  setIfMissing(headers, "x-allstak-request-id", p.requestId);
+}
+function targetMatches(url, targets) {
+  if (!targets || targets.length === 0) return true;
+  return targets.some((target) => typeof target === "string" ? url.includes(target) : target.test(url));
+}
+function newRequestId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = Math.random() * 16 | 0;
     const v = c === "x" ? r : r & 3 | 8;
     return v.toString(16);
   });
 }
+
+// src/modules/http-requests.ts
+var INGEST_PATH4 = "/ingest/v1/http-requests";
+var FLUSH_INTERVAL_MS2 = 5e3;
+var BATCH_SIZE_THRESHOLD2 = 20;
 var HttpRequestModule = class {
   constructor(transport) {
     this.transport = transport;
@@ -1800,10 +2025,10 @@ var HttpRequestModule = class {
       this.onCapture(item);
     }
     this.queue.push({
-      traceId: item.traceId ?? generateTraceId(),
-      requestId: item.requestId ?? generateTraceId(),
-      spanId: item.spanId,
-      parentSpanId: item.parentSpanId,
+      traceId: item.traceId ? normalizeTraceId(item.traceId) : newTraceId(),
+      requestId: item.requestId ?? newTraceId(),
+      spanId: item.spanId ? normalizeSpanId(item.spanId) : void 0,
+      parentSpanId: item.parentSpanId ? normalizeSpanId(item.parentSpanId) : void 0,
       direction: item.direction,
       method: item.method,
       host: item.host,
@@ -1883,18 +2108,6 @@ var CronModule = class {
     this.transport.send(INGEST_PATH5, payload);
   }
 };
-
-// src/utils/uuid.ts
-function generateId() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0;
-    const v = c === "x" ? r : r & 3 | 8;
-    return v.toString(16);
-  });
-}
 
 // src/modules/tracing.ts
 var INGEST_PATH6 = "/ingest/v1/spans";
@@ -2013,16 +2226,19 @@ var TracingModule = class {
   addSpanProcessor(processor) {
     this.spanProcessors.push(processor);
   }
-  withTraceContext(traceId, requestIdOrCallback, maybeCallback) {
+  withTraceContext(traceId, requestIdOrCallback, maybeCallback, parentSpanId) {
     const requestId = typeof requestIdOrCallback === "function" ? void 0 : requestIdOrCallback;
     const callback = typeof requestIdOrCallback === "function" ? requestIdOrCallback : maybeCallback;
+    const normalizedTraceId = traceId ? normalizeTraceId(traceId) : null;
+    const spanStack = parentSpanId ? [normalizeSpanId(parentSpanId)] : [];
     if (!this.asyncStorage) {
-      if (traceId) this.globalState.traceId = traceId;
+      if (normalizedTraceId) this.globalState.traceId = normalizedTraceId;
       if (requestId) this.globalState.requestId = requestId;
+      if (spanStack.length > 0) this.globalState.spanStack = spanStack;
       return callback();
     }
     return this.asyncStorage.run(
-      { traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [], sampled: null },
+      { traceId: normalizedTraceId, requestId: requestId ?? null, spanStack, sampled: null },
       callback
     );
   }
@@ -2051,13 +2267,33 @@ var TracingModule = class {
   getTraceId() {
     const state = this.state();
     if (!state.traceId) {
-      state.traceId = generateId().replace(/-/g, "");
+      state.traceId = newTraceId();
     }
     return state.traceId;
   }
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
-    this.state().traceId = traceId;
+    this.state().traceId = normalizeTraceId(traceId);
+  }
+  /**
+   * Continue a validated inbound W3C trace. Unlike setTraceId(), this rejects
+   * malformed IDs and seeds the span stack with the upstream parent span so the
+   * next local span is correctly linked as a child.
+   */
+  continueTrace(traceId, parentSpanId, sampled) {
+    const normalizedTraceId = traceId.trim().toLowerCase();
+    if (!isValidTraceId(normalizedTraceId)) return false;
+    let normalizedParentSpanId = "";
+    if (parentSpanId != null && parentSpanId.trim() !== "") {
+      normalizedParentSpanId = parentSpanId.trim().toLowerCase();
+      if (!isValidSpanId(normalizedParentSpanId)) return false;
+    }
+    const state = this.state();
+    state.traceId = normalizedTraceId;
+    state.spanStack = normalizedParentSpanId ? [normalizedParentSpanId] : [];
+    state.parentSampled = typeof sampled === "boolean" ? sampled : void 0;
+    state.sampled = typeof sampled === "boolean" ? sampled : null;
+    return true;
   }
   getRequestId() {
     return this.state().requestId ?? null;
@@ -2070,13 +2306,19 @@ var TracingModule = class {
     const state = this.state();
     return state.spanStack.length > 0 ? state.spanStack[state.spanStack.length - 1] : null;
   }
+  getCurrentTraceId() {
+    return this.state().traceId;
+  }
+  getActiveSpanCount() {
+    return this.state().spanStack.length;
+  }
   /**
    * Start a new span. The span is automatically parented to the current
    * active span (if any). Call span.finish() when the operation completes.
    */
   startSpan(operation, options) {
     const state = this.state();
-    const spanId = generateId().replace(/-/g, "");
+    const spanId = newSpanId();
     const parentSpanId = this.getCurrentSpanId() || "";
     const traceId = this.getTraceId();
     const recorded = this.ensureSamplingDecision(operation, {
@@ -2134,9 +2376,9 @@ var TracingModule = class {
     try {
       const now = Date.now();
       const spanData = {
-        traceId: partial.traceId || generateId().replace(/-/g, ""),
-        spanId: partial.spanId || generateId().replace(/-/g, ""),
-        parentSpanId: partial.parentSpanId ?? "",
+        traceId: partial.traceId ? normalizeTraceId(partial.traceId) : newTraceId(),
+        spanId: partial.spanId ? normalizeSpanId(partial.spanId) : newSpanId(),
+        parentSpanId: partial.parentSpanId ? normalizeSpanId(partial.parentSpanId) : "",
         operation: partial.operation,
         description: partial.description ?? "",
         status: partial.status ?? "ok",
@@ -2986,6 +3228,18 @@ function enableDbAutoInstrumentation(dbModule, config) {
   instrumentSqlite(dbModule, config);
 }
 
+// src/utils/uuid.ts
+function generateId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
+
 // src/release-registration.ts
 var registered = /* @__PURE__ */ new Set();
 var SDK_NAME2 = "allstak-js";
@@ -3488,73 +3742,8 @@ function filterDuplicateIntegrations(integrations) {
   return Object.values(byName);
 }
 
-// src/modules/trace-propagation.ts
-function normalizeTraceId(traceId) {
-  return traceId.replace(/-/g, "").slice(0, 32).padEnd(32, "0");
-}
-function normalizeSpanId(spanId) {
-  return spanId.replace(/-/g, "").slice(0, 16).padEnd(16, "0");
-}
-function mergeBaggageValue(existing, baggage) {
-  const preserved = existing.split(",").map((part) => part.trim()).filter((part) => part && !part.toLowerCase().startsWith("allstak-"));
-  return [...preserved, ...baggage.split(",")].join(",");
-}
-function tracePropagationValues(traceId, requestId, options) {
-  const sampled = options?.sampled !== false;
-  const rawSpanId = options?.spanId && options.spanId.length > 0 ? options.spanId : requestId;
-  const spanId = normalizeSpanId(rawSpanId.replace(/-/g, ""));
-  const flag = sampled ? "01" : "00";
-  const traceparent = `00-${normalizeTraceId(traceId)}-${spanId}-${flag}`;
-  const baggage = [
-    `allstak-trace_id=${encodeURIComponent(traceId)}`,
-    `allstak-span_id=${encodeURIComponent(spanId)}`,
-    `allstak-request_id=${encodeURIComponent(requestId)}`
-  ].join(",");
-  return { traceparent, allstakTrace: `${traceId}-${spanId}-${sampled ? "1" : "0"}`, baggage, traceId, requestId };
-}
-function findKey(headers, name) {
-  const lower = name.toLowerCase();
-  for (const key of Object.keys(headers)) {
-    if (key.toLowerCase() === lower) return key;
-  }
-  return void 0;
-}
-function setIfMissing(headers, name, value) {
-  if (!findKey(headers, name)) headers[name] = value;
-}
-function mergeBaggageInto(headers, name, baggage) {
-  const key = findKey(headers, name);
-  if (!key) {
-    headers[name] = baggage;
-    return;
-  }
-  const existing = headers[key];
-  const existingStr = Array.isArray(existing) ? existing.join(",") : String(existing ?? "");
-  headers[key] = mergeBaggageValue(existingStr, baggage);
-}
-function applyTracePropagationToHeaders(headers, traceId, requestId, options) {
-  const p = tracePropagationValues(traceId, requestId, options);
-  setIfMissing(headers, "traceparent", p.traceparent);
-  setIfMissing(headers, "allstak-trace", p.allstakTrace);
-  mergeBaggageInto(headers, "allstak-baggage", p.baggage);
-  mergeBaggageInto(headers, "baggage", p.baggage);
-  setIfMissing(headers, "x-allstak-trace-id", p.traceId);
-  setIfMissing(headers, "x-allstak-request-id", p.requestId);
-}
-function targetMatches(url, targets) {
-  if (!targets || targets.length === 0) return true;
-  return targets.some((target) => typeof target === "string" ? url.includes(target) : target.test(url));
-}
-function newRequestId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0;
-    const v = c === "x" ? r : r & 3 | 8;
-    return v.toString(16);
-  });
-}
-
 // src/modules/auto-breadcrumbs.ts
+var CLICK_FLAG = "__allstak_click_patched__";
 function instrumentFetch(addBreadcrumb, captureRequest, ownBaseUrl, traceContext, bodyCapture, tracePropagationTargets) {
   if (typeof globalThis.fetch !== "function") return;
   const originalFetch = globalThis.fetch;
@@ -3795,6 +3984,131 @@ function instrumentConsole(addBreadcrumb) {
     origError.apply(console, args);
   };
 }
+function instrumentClicks(addBreadcrumb, options = {}) {
+  const doc = globalThis.document;
+  if (!doc || typeof doc.addEventListener !== "function") return;
+  if (doc[CLICK_FLAG]) return;
+  const maxSelectorLength = Math.max(32, options.maxSelectorLength ?? 160);
+  const handler = (event) => {
+    try {
+      const target = closestClickable(event.target);
+      if (!target || isSensitiveClickable(target)) return;
+      const selector = selectorSummary(target, maxSelectorLength);
+      if (!selector) return;
+      const breadcrumb = {
+        type: "ui",
+        message: `click ${selector}`,
+        level: "info",
+        data: { action: "click", selector, tag: tagName(target) }
+      };
+      const next = options.beforeBreadcrumb ? options.beforeBreadcrumb(breadcrumb) : breadcrumb;
+      if (!next) return;
+      const safe = sanitizeAutoBreadcrumb(next);
+      addBreadcrumb(safe.type, safe.message, safe.level, safe.data);
+    } catch {
+    }
+  };
+  doc.addEventListener("click", handler, true);
+  doc[CLICK_FLAG] = true;
+}
+function sanitizeAutoBreadcrumb(breadcrumb) {
+  const safe = redactValue(
+    {
+      type: breadcrumb.type,
+      message: breadcrumb.message,
+      level: breadcrumb.level,
+      data: breadcrumb.data
+    },
+    { scrubValues: true, sendDefaultPii: false }
+  );
+  return {
+    type: typeof safe.type === "string" ? safe.type : "default",
+    message: typeof safe.message === "string" ? safe.message : "",
+    level: typeof safe.level === "string" ? safe.level : void 0,
+    data: safe.data && typeof safe.data === "object" && !Array.isArray(safe.data) ? safe.data : void 0
+  };
+}
+function closestClickable(target) {
+  let el = asElement(target);
+  while (el) {
+    const tag = tagName(el);
+    if (tag === "button" || tag === "a" || tag === "input" || tag === "select" || tag === "textarea" || attr(el, "role") === "button" || attr(el, "data-allstak-click") !== null) {
+      return el;
+    }
+    el = asElement(el.parentElement);
+  }
+  return asElement(target);
+}
+function asElement(value) {
+  if (!value || typeof value !== "object") return null;
+  const maybe = value;
+  return typeof maybe.tagName === "string" || maybe.nodeType === 1 ? value : null;
+}
+function isSensitiveClickable(el) {
+  if (tagName(el) !== "input") return false;
+  const type = (attr(el, "type") ?? "").toLowerCase();
+  return type === "password" || type === "hidden";
+}
+function selectorSummary(el, maxLength) {
+  const tag = tagName(el) || "element";
+  const parts = [tag];
+  const id = cleanSelectorPart(attr(el, "id"));
+  if (id) parts.push(`#${id}`);
+  const classes = classNames(el).slice(0, 3).map(cleanSelectorPart).filter(Boolean);
+  if (classes.length) parts.push(classes.map((c) => `.${c}`).join(""));
+  const role = cleanSelectorPart(attr(el, "role"));
+  if (role) parts.push(`[role="${role}"]`);
+  const type = cleanSelectorPart(attr(el, "type"));
+  if (type && tag === "input") parts.push(`[type="${type}"]`);
+  return truncateSelector(parts.join(""), maxLength);
+}
+function tagName(el) {
+  return (el.tagName ?? "").toLowerCase();
+}
+function attr(el, name) {
+  try {
+    const getter = el.getAttribute;
+    if (typeof getter === "function") return getter.call(el, name);
+    const value = el[name];
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+function classNames(el) {
+  try {
+    const list = el.classList;
+    if (list) return Array.from(list).filter((v) => typeof v === "string");
+    const className = el.className;
+    return typeof className === "string" ? className.split(/\s+/).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+function cleanSelectorPart(value) {
+  if (!value) return "";
+  return value.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
+}
+function truncateSelector(value, maxLength) {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, Math.max(0, maxLength - 12)) + "[truncated]";
+}
+
+// src/integrations/click.ts
+var clickIntegration = defineIntegration(() => ({
+  name: "ClickBreadcrumbs",
+  setup(client) {
+    const options = client.getOptions();
+    if (options.autoBreadcrumbs === false || options.autoBreadcrumbsClick === false) return;
+    instrumentClicks(
+      (type, msg, level, data) => client.addBreadcrumb(type, msg, level, data),
+      {
+        beforeBreadcrumb: options.beforeBreadcrumb,
+        maxSelectorLength: options.clickBreadcrumbMaxSelectorLength
+      }
+    );
+  }
+}));
 
 // src/integrations/console.ts
 var consoleIntegration = defineIntegration(() => ({
@@ -4111,6 +4425,7 @@ function getDefaultIntegrations() {
   return [
     eventFiltersIntegration(),
     dedupeIntegration(),
+    clickIntegration(),
     consoleIntegration(),
     httpClientIntegration(),
     databaseIntegration()
@@ -4702,11 +5017,14 @@ var AllStakClient = class {
    * (default 2000ms), `false` otherwise.
    */
   async flush(timeoutMs = 2e3) {
+    const deadline = Date.now() + timeoutMs;
     this.httpRequests.flush();
     this._database.flush();
     this.tracing.flush();
     this.sessionReplay?.flush();
-    return this.transport.flush(timeoutMs);
+    const errorsReady = await this.errors.flush(Math.max(0, deadline - Date.now()));
+    if (!errorsReady) return false;
+    return this.transport.flush(Math.max(0, deadline - Date.now()));
   }
   /**
    * Phase 3 — runtime override of the SDK identity fields. Used by
@@ -4725,6 +5043,17 @@ var AllStakClient = class {
   }
   getTransportStats() {
     return this.transport.getStats();
+  }
+  getDiagnostics() {
+    const transport = this.transport.getStats();
+    return {
+      transport,
+      breadcrumbs: this.errors.getBreadcrumbCount(),
+      sessionId: this.sessionId,
+      activeTraceCount: this.tracing.getCurrentTraceId() ? 1 : 0,
+      activeSpanCount: this.tracing.getActiveSpanCount(),
+      queueSize: transport.queued
+    };
   }
   /**
    * Start Core Web Vitals collection (browser only). Auto-started at init in the
@@ -4790,11 +5119,11 @@ var AllStakClient = class {
       throw error;
     }
   }
-  withTraceContext(traceId, requestIdOrCallback, maybeCallback) {
+  withTraceContext(traceId, requestIdOrCallback, maybeCallback, parentSpanId) {
     if (typeof requestIdOrCallback === "function") {
       return this.tracing.withTraceContext(traceId, requestIdOrCallback);
     }
-    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback);
+    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback, parentSpanId);
   }
   /** Get the current trace ID (creates one if none exists). */
   getTraceId() {
@@ -4807,6 +5136,10 @@ var AllStakClient = class {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
     this.tracing.setTraceId(traceId);
+  }
+  /** Continue a valid inbound W3C trace with the upstream span as parent. */
+  continueTrace(traceId, parentSpanId, sampled) {
+    return this.tracing.continueTrace(traceId, parentSpanId, sampled);
   }
   /** Get the current active span ID, or null if no span is active. */
   getCurrentSpanId() {
@@ -5147,6 +5480,9 @@ var AllStak = {
     instance?.destroy();
     instance = null;
   },
+  getDiagnostics() {
+    return instance?.getDiagnostics() ?? null;
+  },
   /**
    * Run `callback` with a fresh, temporary {@link Scope} that isolates any
    * user/tag/extra/context/fingerprint/level it sets. Pop is automatic for
@@ -5198,6 +5534,10 @@ var AllStak = {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId) {
     ensureInit().setTraceId(traceId);
+  },
+  /** Continue a valid inbound W3C trace with the upstream span as parent. */
+  continueTrace(traceId, parentSpanId, sampled) {
+    return ensureInit().continueTrace(traceId, parentSpanId, sampled);
   },
   /** Get the current active span ID, or null if no span is active. */
   getCurrentSpanId() {
@@ -5291,8 +5631,10 @@ var allstakExpress = {
         res.setHeader?.("x-allstak-request-id", requestId);
       } catch {
       }
-      const upstreamTrace = firstHeader(req.headers["x-allstak-trace-id"]) ?? firstHeader(req.headers["x-trace-id"]) ?? traceIdFromTraceparent(firstHeader(req.headers["traceparent"]));
-      const upstreamSampled = sampledFromTraceparent(firstHeader(req.headers["traceparent"]));
+      const upstream = parseTraceparent(firstHeader(req.headers["traceparent"]));
+      const upstreamTrace = upstream?.traceId ?? validTraceHeader(firstHeader(req.headers["x-allstak-trace-id"])) ?? validTraceHeader(firstHeader(req.headers["x-trace-id"]));
+      const upstreamParentSpanId = upstream?.parentSpanId;
+      const upstreamSampled = upstream?.sampled;
       sdk.withTraceContext(upstreamTrace, requestId, () => {
         sdk.setParentSampled(upstreamSampled);
         const traceId = sdk.getTraceId();
@@ -5331,6 +5673,7 @@ var allstakExpress = {
               traceId,
               requestId,
               spanId: rootSpan?.spanId,
+              parentSpanId: upstreamParentSpanId,
               direction: "inbound",
               method,
               host,
@@ -5366,7 +5709,7 @@ var allstakExpress = {
         res.on("finish", finalize);
         res.on("close", finalize);
         next();
-      });
+      }, upstreamParentSpanId);
     };
   },
   /**
@@ -5416,16 +5759,9 @@ function firstHeader(value) {
   if (Array.isArray(value)) return value[0];
   return value;
 }
-function traceIdFromTraceparent(header) {
-  if (!header) return void 0;
-  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
-  return match?.[1];
-}
-function sampledFromTraceparent(header) {
-  if (!header) return void 0;
-  const match = /^00-[0-9a-f]{32}-[0-9a-f]{16}-([0-9a-f]{2})$/i.exec(header.trim());
-  if (!match) return void 0;
-  return (parseInt(match[1], 16) & 1) === 1;
+function validTraceHeader(header) {
+  const value = header?.trim().toLowerCase();
+  return isValidTraceId(value) ? value : void 0;
 }
 function generateRequestId2() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();

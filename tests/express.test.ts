@@ -108,4 +108,43 @@ describe('Express integration', () => {
     expect(span.attributes['http.status_code']).toBe('201');
     expect(span.attributes['allstak.request_id']).toBe(captured.requestId);
   });
+
+  it('continues a valid W3C traceparent and ignores invalid custom trace headers', async () => {
+    const upstreamTraceId = '0af7651916cd43dd8448eb211c80319c';
+    const upstreamParentSpanId = 'b7ad6b7169203331';
+    const req = {
+      method: 'GET',
+      originalUrl: '/users',
+      path: '/users',
+      baseUrl: '',
+      route: { path: '/users' },
+      hostname: 'api.example.test',
+      headers: {
+        host: 'api.example.test',
+        traceparent: `00-${upstreamTraceId}-${upstreamParentSpanId}-01`,
+        'x-allstak-trace-id': 'not-a-valid-trace-id',
+      },
+    };
+    const res = createResponse();
+
+    allstakExpress.requestHandler()(req as any, res as any, () => {
+      res.json({ ok: true });
+      res.finish();
+    });
+
+    await AllStak.flush(2000);
+
+    const requestCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/ingest/v1/http-requests'));
+    const spanCall = fetchSpy.mock.calls.find(([url]) => String(url).includes('/ingest/v1/spans'));
+    expect(requestCall).toBeDefined();
+    expect(spanCall).toBeDefined();
+
+    const captured = JSON.parse(requestCall![1].body as string).requests[0];
+    const span = JSON.parse(spanCall![1].body as string).spans[0];
+    expect(captured.traceId).toBe(upstreamTraceId);
+    expect(captured.parentSpanId).toBe(upstreamParentSpanId);
+    expect(span.traceId).toBe(upstreamTraceId);
+    expect(span.parentSpanId).toBe(upstreamParentSpanId);
+    expect(span.spanId).toMatch(/^[0-9a-f]{16}$/);
+  });
 });

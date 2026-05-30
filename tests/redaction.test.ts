@@ -191,6 +191,8 @@ describe('AllStak.captureException — never leaks caller context to the wire', 
             values: [`Bearer ${CANARY}`, { secret: CANARY }],
           },
           card: '4111111111111111',
+          beforeSendToken: CANARY,
+          beforeSendCookie: `sid=${CANARY}`,
         };
         event.requestContext = {
           ...event.requestContext,
@@ -222,6 +224,8 @@ describe('AllStak.captureException — never leaks caller context to the wire', 
     expect(errorPayload.metadata.nested.values[0]).toBe(REDACTED);
     expect(errorPayload.metadata.nested.values[1].secret).toBe(REDACTED);
     expect(errorPayload.metadata.card).toBe(REDACTED);
+    expect(errorPayload.metadata.beforeSendToken).toBe(REDACTED);
+    expect(errorPayload.metadata.beforeSendCookie).toBe(REDACTED);
     expect(errorPayload.requestContext.headers['Set-Cookie']).toBe(REDACTED);
     expect(errorPayload.breadcrumbs.at(-1).message).toBe(REDACTED);
     expect(errorPayload.breadcrumbs.at(-1).data.token).toBe(REDACTED);

@@ -141,9 +141,14 @@ AllStak.captureMessage('deploy started', 'info');
 AllStak.logger.warn('payment retry', { orderId: 'ord_123' });
 AllStak.setUser({ id: 'user_123', email: 'user@example.com' });
 AllStak.setTag('region', 'me-central-1');
+AllStak.continueTrace('4bf92f3577b34da6a3ce929d0e0e4736', '00f067aa0ba902b7', true);
 AllStak.startSpan('checkout.authorize').finish('ok');
 await AllStak.flush();
 ```
+
+`continueTrace(traceId, parentSpanId, sampled)` accepts only valid W3C IDs
+(`traceId` = 32 lowercase hex, `parentSpanId` = 16 lowercase hex). It returns
+`false` and leaves the current trace unchanged when inbound IDs are malformed.
 
 ## Configuration
 

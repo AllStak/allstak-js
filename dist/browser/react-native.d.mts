@@ -1,6 +1,6 @@
 export { AllStak } from './index.mjs';
-import './database-BAE1jk06.mjs';
-import './auto-breadcrumbs-DRB0ieVv.mjs';
+import './database-D1L57LlB.mjs';
+import './auto-breadcrumbs-CgFR_aOl.mjs';
 
 /**
  * React Native integration for AllStak.

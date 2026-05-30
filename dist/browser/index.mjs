@@ -6,9 +6,11 @@ import {
   SessionTracker,
   Span,
   WebVitalsModule,
+  __resetClickInstrumentationFlagForTest,
   _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
+  clickIntegration,
   consoleIntegration,
   createOfflineQueue,
   databaseIntegration,
@@ -18,13 +20,14 @@ import {
   eventFiltersIntegration,
   httpClientIntegration,
   inboundFiltersIntegration,
+  instrumentClicks,
   isNodeRuntime,
   isWebVitalsSupported,
   parseGitRelease,
   registerRuntimeRelease,
   setPersistence,
   src_default
-} from "./chunk-2VSZDDHS.mjs";
+} from "./chunk-AUOG4S3K.mjs";
 import "./chunk-KENGFPTD.mjs";
 export {
   AllStak,
@@ -34,9 +37,11 @@ export {
   SessionTracker,
   Span,
   WebVitalsModule,
+  __resetClickInstrumentationFlagForTest,
   _resetRuntimeReleaseRegistrationForTest,
   applyReleaseAutodetect,
   canRegisterRuntimeRelease,
+  clickIntegration,
   consoleIntegration,
   createOfflineQueue,
   databaseIntegration,
@@ -47,6 +52,7 @@ export {
   eventFiltersIntegration,
   httpClientIntegration,
   inboundFiltersIntegration,
+  instrumentClicks,
   isNodeRuntime,
   isWebVitalsSupported,
   parseGitRelease,

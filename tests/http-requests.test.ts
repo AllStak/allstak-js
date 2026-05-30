@@ -74,8 +74,9 @@ describe('HTTP Request Module', () => {
 
   it('uses provided traceId and timestamp', async () => {
     const ts = '2026-01-15T10:00:00.000Z';
+    const traceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     AllStak.captureRequest({
-      traceId: 'my-trace-id',
+      traceId,
       direction: 'outbound',
       method: 'DELETE',
       host: 'storage.example.com',
@@ -89,7 +90,7 @@ describe('HTTP Request Module', () => {
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.requests[0].traceId).toBe('my-trace-id');
+    expect(body.requests[0].traceId).toBe(traceId);
     expect(body.requests[0].timestamp).toBe(ts);
   });
 

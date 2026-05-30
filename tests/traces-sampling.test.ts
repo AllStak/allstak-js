@@ -54,6 +54,8 @@ describe('tracesSampleRate — span recording', () => {
 
     const spans = sentSpans();
     expect(spans).toHaveLength(1);
+    expect(spans[0].traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(spans[0].spanId).toMatch(/^[0-9a-f]{16}$/);
     expect(spans[0].operation).toBe('GET /users');
     expect(tracing.getSampled()).toBe(true);
     tracing.destroy();
@@ -158,6 +160,42 @@ describe('tracesSampler — function form', () => {
 });
 
 describe('sticky head-of-trace inheritance', () => {
+  it('continueTrace parents the next local span to the inbound W3C span', () => {
+    const { transport, sentSpans } = fakeTransport();
+    const tracing = new TracingModule(transport, {});
+    const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+    const parentSpanId = '00f067aa0ba902b7';
+
+    expect(tracing.continueTrace(traceId, parentSpanId, true)).toBe(true);
+    const root = tracing.startSpan('http.server');
+    const child = tracing.startSpan('db.sqlite.query');
+    child.finish('ok');
+    root.finish('ok');
+    tracing.flush();
+
+    const spans = sentSpans();
+    expect(spans).toHaveLength(2);
+    const serverSpan = spans.find((span) => span.operation === 'http.server');
+    const dbSpan = spans.find((span) => span.operation === 'db.sqlite.query');
+    expect(serverSpan?.traceId).toBe(traceId);
+    expect(serverSpan?.parentSpanId).toBe(parentSpanId);
+    expect(dbSpan?.parentSpanId).toBe(serverSpan?.spanId);
+    tracing.destroy();
+  });
+
+  it('continueTrace rejects malformed inbound trace IDs without replacing the active trace', () => {
+    const { transport, sentSpans } = fakeTransport();
+    const tracing = new TracingModule(transport, {});
+    const existingTraceId = tracing.getTraceId();
+
+    expect(tracing.continueTrace('not-a-trace-id', '00f067aa0ba902b7', true)).toBe(false);
+    tracing.startSpan('work').finish('ok');
+    tracing.flush();
+
+    expect(sentSpans()[0].traceId).toBe(existingTraceId);
+    tracing.destroy();
+  });
+
   it('children inherit the root decision; sampler called once per trace (sampled)', () => {
     const { transport, sentSpans } = fakeTransport();
     const sampler = vi.fn<(c: SamplingContext) => boolean>(() => true);
@@ -250,5 +288,15 @@ describe('propagation uses the active span id (synthetic-id fix)', () => {
       spanId: 'abcdef0123456789ffff',
     });
     expect(v.traceparent.split('-')[2]).toBe('abcdef0123456789');
+  });
+
+  it('normalizes UUID-form trace and span ids to W3C header widths', () => {
+    const v = tracePropagationValues(
+      '7f3ac1d9-2b8e-4a6f-8c1a-000000000001',
+      '11111111-2222-4333-8444-555555555555',
+      { spanId: 'abcdef01-2345-6789-abcd-ef0123456789' },
+    );
+    expect(v.traceparent).toBe('00-7f3ac1d92b8e4a6f8c1a000000000001-abcdef0123456789-01');
+    expect(v.traceId).toBe('7f3ac1d92b8e4a6f8c1a000000000001');
   });
 });

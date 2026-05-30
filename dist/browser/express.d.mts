@@ -1,4 +1,4 @@
-import { H as HttpBodyCaptureOptions } from './auto-breadcrumbs-DRB0ieVv.mjs';
+import { H as HttpBodyCaptureOptions } from './auto-breadcrumbs-CgFR_aOl.mjs';
 
 /**
  * Drop-in Express middleware for the AllStak SDK.

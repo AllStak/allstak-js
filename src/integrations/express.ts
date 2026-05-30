@@ -27,6 +27,7 @@
 import { AllStak } from '../index';
 import type { Span } from '../modules/tracing';
 import type { HttpBodyCaptureOptions } from '../modules/auto-breadcrumbs';
+import { isValidTraceId, parseTraceparent } from '../modules/trace-propagation';
 import { redactHeaderRecord, redactValue } from '../utils/redact';
 
 // Minimal Express type-shapes — we don't depend on @types/express to keep
@@ -149,11 +150,14 @@ export const allstakExpress = {
         /* best effort */
       }
 
-      // Honor upstream W3C traceparent or AllStak trace headers if present.
-      const upstreamTrace = firstHeader(req.headers['x-allstak-trace-id'])
-        ?? firstHeader(req.headers['x-trace-id'])
-        ?? traceIdFromTraceparent(firstHeader(req.headers['traceparent']));
-      const upstreamSampled = sampledFromTraceparent(firstHeader(req.headers['traceparent']));
+      // Honor a valid upstream W3C traceparent first. Invalid inbound trace
+      // headers are ignored so bad custom headers cannot poison the trace.
+      const upstream = parseTraceparent(firstHeader(req.headers['traceparent']));
+      const upstreamTrace = upstream?.traceId
+        ?? validTraceHeader(firstHeader(req.headers['x-allstak-trace-id']))
+        ?? validTraceHeader(firstHeader(req.headers['x-trace-id']));
+      const upstreamParentSpanId = upstream?.parentSpanId;
+      const upstreamSampled = upstream?.sampled;
 
       sdk.withTraceContext(upstreamTrace, requestId, () => {
         // Surface the inbound sampling decision to a configured tracesSampler.
@@ -198,6 +202,7 @@ export const allstakExpress = {
               traceId,
               requestId,
               spanId: rootSpan?.spanId,
+              parentSpanId: upstreamParentSpanId,
               direction: 'inbound',
               method,
               host,
@@ -237,7 +242,7 @@ export const allstakExpress = {
         res.on('close', finalize);
 
         next();
-      });
+      }, upstreamParentSpanId);
     };
   },
 
@@ -299,18 +304,9 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
   return value;
 }
 
-function traceIdFromTraceparent(header: string | undefined): string | undefined {
-  if (!header) return undefined;
-  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i.exec(header.trim());
-  return match?.[1];
-}
-
-/** Parse the trace-flags sampled bit (LSB) from an incoming W3C traceparent. */
-function sampledFromTraceparent(header: string | undefined): boolean | undefined {
-  if (!header) return undefined;
-  const match = /^00-[0-9a-f]{32}-[0-9a-f]{16}-([0-9a-f]{2})$/i.exec(header.trim());
-  if (!match) return undefined;
-  return (parseInt(match[1], 16) & 0x01) === 0x01;
+function validTraceHeader(header: string | undefined): string | undefined {
+  const value = header?.trim().toLowerCase();
+  return isValidTraceId(value) ? value : undefined;
 }
 
 function generateRequestId(): string {

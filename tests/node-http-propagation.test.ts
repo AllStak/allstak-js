@@ -12,7 +12,7 @@ describe('trace-propagation primitives', () => {
   it('produces a W3C traceparent and allstak baggage', () => {
     const v = tracePropagationValues('7f3ac1d9', 'a1b2c3d4');
     expect(v.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
-    expect(v.baggage).toContain('allstak-trace_id=7f3ac1d9');
+    expect(v.baggage).toContain('allstak-trace_id=7f3ac1d900000000000000000000000');
     expect(v.baggage).toContain('allstak-request_id=a1b2c3d4');
   });
 
@@ -21,11 +21,11 @@ describe('trace-propagation primitives', () => {
       traceparent: 'EXISTING',
       baggage: 'vendor=1',
     };
-    applyTracePropagationToHeaders(headers, 'tid', 'rid');
+    applyTracePropagationToHeaders(headers, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'rid');
     expect(headers.traceparent).toBe('EXISTING'); // not overwritten
     expect(String(headers.baggage)).toContain('vendor=1'); // preserved
-    expect(String(headers.baggage)).toContain('allstak-trace_id=tid'); // merged
-    expect(headers['x-allstak-trace-id']).toBe('tid');
+    expect(String(headers.baggage)).toContain('allstak-trace_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'); // merged
+    expect(headers['x-allstak-trace-id']).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
   });
 
   it('targetMatches: empty = all, string contains, regex', () => {
@@ -69,7 +69,7 @@ function requestHeaders(
 
 describe('instrumentNodeHttp trace propagation', () => {
   it('injects traceparent + allstak headers on an outbound http.request', async () => {
-    const traceId = '7f3ac1d92b8e4a6f';
+    const traceId = '7f3ac1d92b8e4a6f7f3ac1d92b8e4a6f';
     const headers = await requestHeaders('http://ingest.invalid', () => traceId);
     expect(headers['traceparent']).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     expect(headers['x-allstak-trace-id']).toBe(traceId);

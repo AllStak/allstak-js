@@ -1,5 +1,12 @@
 import { HttpTransport } from '../transport/http';
-import { generateId } from '../utils/uuid';
+import {
+  isValidSpanId,
+  isValidTraceId,
+  newSpanId,
+  newTraceId,
+  normalizeSpanId,
+  normalizeTraceId,
+} from './trace-propagation';
 
 export interface SpanData {
   traceId: string;
@@ -273,21 +280,25 @@ export class TracingModule {
    * Browser builds fall back to the historical global context.
    */
   withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
-  withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+  withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T, parentSpanId?: string): T;
   withTraceContext<T>(
     traceId: string | undefined,
     requestIdOrCallback: string | undefined | (() => T),
     maybeCallback?: () => T,
+    parentSpanId?: string,
   ): T {
     const requestId = typeof requestIdOrCallback === 'function' ? undefined : requestIdOrCallback;
     const callback = typeof requestIdOrCallback === 'function' ? requestIdOrCallback : maybeCallback!;
+    const normalizedTraceId = traceId ? normalizeTraceId(traceId) : null;
+    const spanStack = parentSpanId ? [normalizeSpanId(parentSpanId)] : [];
     if (!this.asyncStorage) {
-      if (traceId) this.globalState.traceId = traceId;
+      if (normalizedTraceId) this.globalState.traceId = normalizedTraceId;
       if (requestId) this.globalState.requestId = requestId;
+      if (spanStack.length > 0) this.globalState.spanStack = spanStack;
       return callback();
     }
     return this.asyncStorage.run(
-      { traceId: traceId ?? null, requestId: requestId ?? null, spanStack: [], sampled: null },
+      { traceId: normalizedTraceId, requestId: requestId ?? null, spanStack, sampled: null },
       callback,
     );
   }
@@ -320,14 +331,37 @@ export class TracingModule {
   getTraceId(): string {
     const state = this.state();
     if (!state.traceId) {
-      state.traceId = generateId().replace(/-/g, '');
+      state.traceId = newTraceId();
     }
     return state.traceId;
   }
 
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId: string): void {
-    this.state().traceId = traceId;
+    this.state().traceId = normalizeTraceId(traceId);
+  }
+
+  /**
+   * Continue a validated inbound W3C trace. Unlike setTraceId(), this rejects
+   * malformed IDs and seeds the span stack with the upstream parent span so the
+   * next local span is correctly linked as a child.
+   */
+  continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean {
+    const normalizedTraceId = traceId.trim().toLowerCase();
+    if (!isValidTraceId(normalizedTraceId)) return false;
+
+    let normalizedParentSpanId = '';
+    if (parentSpanId != null && parentSpanId.trim() !== '') {
+      normalizedParentSpanId = parentSpanId.trim().toLowerCase();
+      if (!isValidSpanId(normalizedParentSpanId)) return false;
+    }
+
+    const state = this.state();
+    state.traceId = normalizedTraceId;
+    state.spanStack = normalizedParentSpanId ? [normalizedParentSpanId] : [];
+    state.parentSampled = typeof sampled === 'boolean' ? sampled : undefined;
+    state.sampled = typeof sampled === 'boolean' ? sampled : null;
+    return true;
   }
 
   getRequestId(): string | null {
@@ -346,6 +380,14 @@ export class TracingModule {
       : null;
   }
 
+  getCurrentTraceId(): string | null {
+    return this.state().traceId;
+  }
+
+  getActiveSpanCount(): number {
+    return this.state().spanStack.length;
+  }
+
   /**
    * Start a new span. The span is automatically parented to the current
    * active span (if any). Call span.finish() when the operation completes.
@@ -355,7 +397,7 @@ export class TracingModule {
     options?: SpanOptions,
   ): Span {
     const state = this.state();
-    const spanId = generateId().replace(/-/g, '');
+    const spanId = newSpanId();
     const parentSpanId = this.getCurrentSpanId() || '';
     const traceId = this.getTraceId();
 
@@ -422,9 +464,9 @@ export class TracingModule {
     try {
       const now = Date.now();
       const spanData: SpanData = {
-        traceId: partial.traceId || generateId().replace(/-/g, ''),
-        spanId: partial.spanId || generateId().replace(/-/g, ''),
-        parentSpanId: partial.parentSpanId ?? '',
+        traceId: partial.traceId ? normalizeTraceId(partial.traceId) : newTraceId(),
+        spanId: partial.spanId ? normalizeSpanId(partial.spanId) : newSpanId(),
+        parentSpanId: partial.parentSpanId ? normalizeSpanId(partial.parentSpanId) : '',
         operation: partial.operation,
         description: partial.description ?? '',
         status: partial.status ?? 'ok',

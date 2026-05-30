@@ -245,6 +245,7 @@ export class ErrorModule {
   private breadcrumbs: Breadcrumb[] = [];
   private maxBreadcrumbs: number;
   private eventProcessors: ErrorEventProcessor[] = [];
+  private pendingPipelines = new Set<Promise<void>>();
   /**
    * Optional hook invoked when the browser autocapture observes an UNHANDLED
    * error/rejection. The client wires this to mark the release-health session
@@ -294,6 +295,10 @@ export class ErrorModule {
 
   clearBreadcrumbs(): void {
     this.breadcrumbs = [];
+  }
+
+  getBreadcrumbCount(): number {
+    return this.breadcrumbs.length;
   }
 
   /**
@@ -416,7 +421,7 @@ export class ErrorModule {
       fingerprint: this.config.fingerprint,
     };
 
-    this.sendThroughPipeline(payload);
+    this.enqueuePipeline(payload);
   }
 
   captureMessage(
@@ -448,7 +453,20 @@ export class ErrorModule {
       fingerprint: this.config.fingerprint,
     };
 
-    this.sendThroughPipeline(payload);
+    this.enqueuePipeline(payload);
+  }
+
+  async flush(timeoutMs = 2000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pendingPipelines.size > 0) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await Promise.race([
+        Promise.allSettled(Array.from(this.pendingPipelines)),
+        new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining))),
+      ]);
+    }
+    return true;
   }
 
   // ── Filtering / control ─────────────────────────────────────────────
@@ -522,6 +540,12 @@ export class ErrorModule {
     final = this.sanitizeForWire(final);
     if (!final) return;
     this.transport.send(INGEST_PATH, final);
+  }
+
+  private enqueuePipeline(payload: ErrorIngestPayload): void {
+    const pending = this.sendThroughPipeline(payload).catch(() => undefined);
+    this.pendingPipelines.add(pending);
+    pending.finally(() => this.pendingPipelines.delete(pending)).catch(() => undefined);
   }
 
   private sanitizeForWire(payload: ErrorIngestPayload): ErrorIngestPayload {

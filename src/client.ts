@@ -9,7 +9,7 @@ import { TracingModule, Span, SpanData, SpanFilterPattern, SpanOptions, SpanProc
 import { WebVitalsModule, isWebVitalsSupported } from './modules/web-vitals';
 import { DatabaseModule, DbQueryItem } from './modules/database';
 import { setTraceResolver } from './integrations/db/shared';
-import { HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
+import { BeforeBreadcrumb, HttpBodyCaptureOptions, TracePropagationTarget } from './modules/auto-breadcrumbs';
 import { generateId } from './utils/uuid';
 import { registerRuntimeRelease } from './release-registration';
 import { SessionTracker, isTestRuntime as isSessionTestRuntime } from './session';
@@ -88,6 +88,15 @@ export interface ScreenshotCaptureOptions {
   provider?: (reason: { type: 'error'; error: Error; traceId?: string; requestId?: string }) =>
     | ScreenshotArtifact | null | undefined
     | Promise<ScreenshotArtifact | null | undefined>;
+}
+
+export interface SdkDiagnostics {
+  transport: TransportStats;
+  breadcrumbs: number;
+  sessionId: string;
+  activeTraceCount: number;
+  activeSpanCount: number;
+  queueSize: number;
 }
 
 export interface AllStakConfig extends ReleaseMetadata {
@@ -268,6 +277,15 @@ export interface AllStakConfig extends ReleaseMetadata {
   integrations?: IntegrationOption;
   /** Enable automatic breadcrumbs for fetch, console.warn/error, and HTTP requests. Default: true */
   autoBreadcrumbs?: boolean;
+  /**
+   * Enable privacy-safe browser click breadcrumbs. Default: true when
+   * `autoBreadcrumbs` is enabled and `document.addEventListener` exists.
+   */
+  autoBreadcrumbsClick?: boolean;
+  /** Mutate or drop auto-captured click breadcrumbs before they are buffered. */
+  beforeBreadcrumb?: BeforeBreadcrumb;
+  /** Maximum selector length for click breadcrumbs. Default: 160, minimum: 32. */
+  clickBreadcrumbMaxSelectorLength?: number;
   /** Enable automatic database instrumentation for pg and mysql2. Default: true */
   autoDbInstrumentation?: boolean;
   /** Enable automatic capture of Node uncaughtException + unhandledRejection. Default: true */
@@ -887,11 +905,14 @@ export class AllStakClient {
    * (default 2000ms), `false` otherwise.
    */
   async flush(timeoutMs = 2000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
     this.httpRequests.flush();
     this._database.flush();
     this.tracing.flush();
     this.sessionReplay?.flush();
-    return this.transport.flush(timeoutMs);
+    const errorsReady = await this.errors.flush(Math.max(0, deadline - Date.now()));
+    if (!errorsReady) return false;
+    return this.transport.flush(Math.max(0, deadline - Date.now()));
   }
 
   /**
@@ -913,6 +934,18 @@ export class AllStakClient {
 
   getTransportStats(): TransportStats {
     return this.transport.getStats();
+  }
+
+  getDiagnostics(): SdkDiagnostics {
+    const transport = this.transport.getStats();
+    return {
+      transport,
+      breadcrumbs: this.errors.getBreadcrumbCount(),
+      sessionId: this.sessionId,
+      activeTraceCount: this.tracing.getCurrentTraceId() ? 1 : 0,
+      activeSpanCount: this.tracing.getActiveSpanCount(),
+      queueSize: transport.queued,
+    };
   }
 
   /**
@@ -993,16 +1026,17 @@ export class AllStakClient {
 
   /** @internal Used by server framework integrations to isolate request tracing. */
   withTraceContext<T>(traceId: string | undefined, callback: () => T): T;
-  withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T): T;
+  withTraceContext<T>(traceId: string | undefined, requestId: string | undefined, callback: () => T, parentSpanId?: string): T;
   withTraceContext<T>(
     traceId: string | undefined,
     requestIdOrCallback: string | undefined | (() => T),
     maybeCallback?: () => T,
+    parentSpanId?: string,
   ): T {
     if (typeof requestIdOrCallback === 'function') {
       return this.tracing.withTraceContext(traceId, requestIdOrCallback);
     }
-    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback!);
+    return this.tracing.withTraceContext(traceId, requestIdOrCallback, maybeCallback!, parentSpanId);
   }
 
   /** Get the current trace ID (creates one if none exists). */
@@ -1018,6 +1052,11 @@ export class AllStakClient {
   /** Set the trace ID explicitly (e.g. from an incoming request header). */
   setTraceId(traceId: string): void {
     this.tracing.setTraceId(traceId);
+  }
+
+  /** Continue a valid inbound W3C trace with the upstream span as parent. */
+  continueTrace(traceId: string, parentSpanId?: string, sampled?: boolean): boolean {
+    return this.tracing.continueTrace(traceId, parentSpanId, sampled);
   }
 
   /** Get the current active span ID, or null if no span is active. */

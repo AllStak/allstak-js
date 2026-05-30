@@ -300,6 +300,25 @@ describe('flush()', () => {
     expect(await AllStak.flush(500)).toBe(true);
   });
 
+  it('waits for pending async error pipeline work before reporting drained', async () => {
+    AllStak.init({
+      apiKey: 'k',
+      autoBreadcrumbs: false,
+      autoNodeErrorCapture: false,
+      autoDbInstrumentation: false,
+      beforeSend: async (event: any) => {
+        await wait(50);
+        return { ...event, message: `flushed:${event.message}` };
+      },
+    });
+
+    AllStak.captureException(new Error('pipeline'));
+
+    expect(await AllStak.flush(500)).toBe(true);
+    const payload = JSON.parse(sent.find((entry) => entry.url.includes('/ingest/v1/errors'))!.init.body);
+    expect(payload.message).toBe('flushed:pipeline');
+  });
+
   it('flushes completed spans and waits for transport delivery', async () => {
     AllStak.init({ apiKey: 'k', autoBreadcrumbs: false, autoNodeErrorCapture: false, autoDbInstrumentation: false });
 
