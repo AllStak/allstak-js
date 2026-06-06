@@ -88,6 +88,8 @@ interface ErrorIngestPayload {
     breadcrumbs?: Breadcrumb[];
     requestContext?: ErrorRequestContext;
     fingerprint?: string[];
+    mechanism?: string;
+    handled?: boolean;
 }
 type EventFilterPattern = string | RegExp;
 type ErrorEventProcessor = (event: ErrorIngestPayload) => ErrorIngestPayload | null | undefined | Promise<ErrorIngestPayload | null | undefined>;

@@ -32,7 +32,7 @@ import { detectGitRelease, GitRunner } from './release-detect';
 export const INGEST_HOST = 'https://api.allstak.sa';
 
 /** SDK semver. Sent on the wire as `sdk.version` in event metadata. */
-export const SDK_VERSION = '0.3.1';
+export const SDK_VERSION = '0.3.2';
 /** SDK package name. Sent on the wire as `sdk.name`. */
 export const SDK_NAME = 'allstak-js';
 
@@ -1256,7 +1256,11 @@ export class AllStakClient {
       try {
         // Unhandled/fatal → crashed (terminal, overrides errored).
         this.sessionTracker?.recordCrash();
-        this.errors.captureException(e, { source: 'uncaughtException' });
+        this.errors.captureException(e, {
+          source: 'uncaughtException',
+          mechanism: 'uncaughtException',
+          handled: false,
+        });
       } catch {
         /* never break the host process */
       }
@@ -1268,7 +1272,11 @@ export class AllStakClient {
       try {
         // Unhandled/fatal → crashed (terminal, overrides errored).
         this.sessionTracker?.recordCrash();
-        this.errors.captureException(e, { source: 'unhandledRejection' });
+        this.errors.captureException(e, {
+          source: 'unhandledRejection',
+          mechanism: 'unhandledRejection',
+          handled: false,
+        });
       } catch {
         /* never break the host process */
       }

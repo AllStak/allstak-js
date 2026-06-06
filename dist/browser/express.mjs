@@ -4,7 +4,7 @@ import {
   parseTraceparent,
   redactHeaderRecord,
   redactValue
-} from "./chunk-AUOG4S3K.mjs";
+} from "./chunk-TYEZKY5Z.mjs";
 import "./chunk-KENGFPTD.mjs";
 
 // src/integrations/express.ts

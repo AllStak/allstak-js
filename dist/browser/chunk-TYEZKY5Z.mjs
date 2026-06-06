@@ -1,14 +1,10 @@
-import { createRequire as __allstakCreateRequire } from 'node:module';
-const require = __allstakCreateRequire(import.meta.url);
 import {
+  __require,
   instrumentMysql2,
   instrumentPg,
   instrumentSqlite,
   setTraceResolver
-} from "./chunk-2Z2PH3DC.mjs";
-import {
-  __require
-} from "./chunk-6GVGKK5H.mjs";
+} from "./chunk-KENGFPTD.mjs";
 
 // src/transport/buffer.ts
 var MAX_BUFFER_SIZE = 100;
@@ -290,7 +286,7 @@ function detectGlobalAsyncStorage() {
 }
 function isNodeRuntime() {
   try {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined" || typeof process !== "undefined" && !!process.versions?.node && typeof window === "undefined";
   } catch {
     return false;
   }
@@ -1347,6 +1343,8 @@ var ErrorModule = class {
       requestId: stringContext(context, "requestId"),
       replayId: stringContext(context, "replayId"),
       service: stringContext(context, "service"),
+      mechanism: stringContext(context, "mechanism") ?? "captureException",
+      handled: booleanContext(context, "handled") ?? true,
       user: this.config.user,
       metadata: this.buildMetadata(context, platform, requestCtx, transaction),
       breadcrumbs: currentBreadcrumbs,
@@ -1371,6 +1369,8 @@ var ErrorModule = class {
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
+      mechanism: "captureMessage",
+      handled: true,
       user: this.config.user,
       metadata: this.buildMetadata(callerMeta, platform, browserRequestContext()),
       requestContext: browserRequestContext(),
@@ -1489,12 +1489,12 @@ var ErrorModule = class {
       const errorEvent = event;
       const err = errorEvent.error instanceof Error ? errorEvent.error : new Error(errorEvent.message || "Unknown error");
       this.notifyUnhandled();
-      this.captureException(err);
+      this.captureException(err, { mechanism: "onerror", handled: false });
     });
     this.onUnhandledRejectionHandler = (event) => {
       const err = event.reason instanceof Error ? event.reason : new Error(String(event.reason));
       this.notifyUnhandled();
-      this.captureException(err);
+      this.captureException(err, { mechanism: "onunhandledrejection", handled: false });
     };
     window.addEventListener("error", this.onErrorHandler);
     window.addEventListener(
@@ -1525,6 +1525,10 @@ function stringContext(context, key) {
   const value = context?.[key];
   if (typeof value !== "string") return void 0;
   return value.trim().length > 0 ? value : void 0;
+}
+function booleanContext(context, key) {
+  const value = context?.[key];
+  return typeof value === "boolean" ? value : void 0;
 }
 
 // src/modules/logs.ts
@@ -2462,7 +2466,7 @@ var TracingModule = class {
 };
 function createAsyncTraceStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -2802,7 +2806,7 @@ function registerRuntimeRelease(options) {
 }
 function isTestRuntime() {
   try {
-    if (process.env.NODE_ENV === "test" || process.env.VITEST === "true" || process.env.VITEST_WORKER_ID != null || process.env.VITEST_POOL_ID != null) {
+    if (process.env.VITEST === "true" || process.env.VITEST_WORKER_ID != null || process.env.VITEST_POOL_ID != null) {
       return true;
     }
   } catch {
@@ -2861,7 +2865,7 @@ var Session = class {
 function isTestRuntime2() {
   try {
     if (typeof process !== "undefined" && process.env) {
-      return process.env.NODE_ENV === "test" || process.env.VITEST === "true" || process.env.VITEST_WORKER_ID != null || process.env.VITEST_POOL_ID != null;
+      return process.env.VITEST === "true" || process.env.VITEST_WORKER_ID != null || process.env.VITEST_POOL_ID != null;
     }
   } catch {
   }
@@ -4105,7 +4109,7 @@ function mergeScopes(base, stack) {
 
 // src/client.ts
 var INGEST_HOST = "https://api.allstak.sa";
-var SDK_VERSION = "0.3.1";
+var SDK_VERSION = "0.3.2";
 var SDK_NAME = "allstak-js";
 function envVar(name) {
   try {
@@ -4264,7 +4268,7 @@ var AllStakClient = class {
     }
   }
   isNodeBuild() {
-    return true;
+    return typeof globalThis.__ALLSTAK_NODE__ !== "undefined";
   }
   isNodeRuntime() {
     return this.isNodeBuild() || typeof process !== "undefined" && !!process.versions?.node;
@@ -4836,7 +4840,11 @@ var AllStakClient = class {
       const e = err instanceof Error ? err : new Error(String(err));
       try {
         this.sessionTracker?.recordCrash();
-        this.errors.captureException(e, { source: "uncaughtException" });
+        this.errors.captureException(e, {
+          source: "uncaughtException",
+          mechanism: "uncaughtException",
+          handled: false
+        });
       } catch {
       }
       this.uninstallNodeErrorHandlers();
@@ -4846,7 +4854,11 @@ var AllStakClient = class {
       const e = reason instanceof Error ? reason : new Error(String(reason));
       try {
         this.sessionTracker?.recordCrash();
-        this.errors.captureException(e, { source: "unhandledRejection" });
+        this.errors.captureException(e, {
+          source: "unhandledRejection",
+          mechanism: "unhandledRejection",
+          handled: false
+        });
       } catch {
       }
       this.uninstallNodeErrorHandlers();
@@ -4873,7 +4885,7 @@ var AllStakClient = class {
 };
 function createAsyncScopeStorage() {
   const proc = globalThis.process;
-  if (false) return null;
+  if (typeof globalThis.__ALLSTAK_NODE__ === "undefined" && !proc?.versions?.node) return null;
   try {
     const fromProcess = proc?.getBuiltinModule?.("node:async_hooks")?.AsyncLocalStorage;
     if (fromProcess) return new fromProcess();
@@ -5124,8 +5136,9 @@ export {
   isNodeRuntime2 as isNodeRuntime,
   detectGitRelease,
   Scope,
+  SDK_VERSION,
   applyReleaseAutodetect,
   AllStak,
   src_default
 };
-//# sourceMappingURL=chunk-Y3JEHE6Y.mjs.map
+//# sourceMappingURL=chunk-TYEZKY5Z.mjs.map

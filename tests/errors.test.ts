@@ -33,6 +33,8 @@ describe('Error Module', () => {
     expect(body.stackTrace).toBeDefined();
     expect(body.environment).toBe('test');
     expect(body.release).toBe('1.0.0');
+    expect(body.mechanism).toBe('captureException');
+    expect(body.handled).toBe(true);
     // metadata may also include auto-injected traceId/spanId from the client
     // wrapper, in addition to the caller's own context fields.
     expect(body.metadata).toMatchObject({ route: '/api/users' });
@@ -62,6 +64,8 @@ describe('Error Module', () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.message).toBe('Uncaught!');
     expect(body.level).toBe('error');
+    expect(body.mechanism).toBe('onerror');
+    expect(body.handled).toBe(false);
   });
 
   it('auto-captures unhandledrejection', async () => {
@@ -73,6 +77,8 @@ describe('Error Module', () => {
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.message).toBe('Promise failed');
+    expect(body.mechanism).toBe('onunhandledrejection');
+    expect(body.handled).toBe(false);
   });
 
   it('failed request pushes to buffer', async () => {

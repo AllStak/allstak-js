@@ -6,7 +6,7 @@ import {
   parseTraceparent,
   redactHeaderRecord,
   redactValue
-} from "./chunk-Y3JEHE6Y.mjs";
+} from "./chunk-QRGIG4ND.mjs";
 import "./chunk-2Z2PH3DC.mjs";
 import "./chunk-6GVGKK5H.mjs";
 

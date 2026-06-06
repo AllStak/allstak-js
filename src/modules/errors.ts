@@ -87,6 +87,8 @@ export interface ErrorIngestPayload {
   breadcrumbs?: Breadcrumb[];
   requestContext?: ErrorRequestContext;
   fingerprint?: string[];
+  mechanism?: string;
+  handled?: boolean;
 }
 
 export type EventFilterPattern = string | RegExp;
@@ -414,6 +416,8 @@ export class ErrorModule {
       requestId: stringContext(context, 'requestId'),
       replayId: stringContext(context, 'replayId'),
       service: stringContext(context, 'service'),
+      mechanism: stringContext(context, 'mechanism') ?? 'captureException',
+      handled: booleanContext(context, 'handled') ?? true,
       user: this.config.user,
       metadata: this.buildMetadata(context, platform, requestCtx, transaction),
       breadcrumbs: currentBreadcrumbs,
@@ -447,6 +451,8 @@ export class ErrorModule {
       environment: this.config.environment,
       release: this.config.release,
       sessionId: this.sessionId,
+      mechanism: 'captureMessage',
+      handled: true,
       user: this.config.user,
       metadata: this.buildMetadata(callerMeta, platform, browserRequestContext()),
       requestContext: browserRequestContext(),
@@ -594,7 +600,7 @@ export class ErrorModule {
           ? errorEvent.error
           : new Error(errorEvent.message || 'Unknown error');
       this.notifyUnhandled();
-      this.captureException(err);
+      this.captureException(err, { mechanism: 'onerror', handled: false });
     }) as (event: ErrorEvent) => void;
 
     this.onUnhandledRejectionHandler = (event: PromiseRejectionEvent) => {
@@ -603,7 +609,7 @@ export class ErrorModule {
           ? event.reason
           : new Error(String(event.reason));
       this.notifyUnhandled();
-      this.captureException(err);
+      this.captureException(err, { mechanism: 'onunhandledrejection', handled: false });
     };
 
     window.addEventListener('error', this.onErrorHandler as unknown as EventListener);
@@ -639,4 +645,9 @@ function stringContext(context: Record<string, unknown> | undefined, key: string
   const value = context?.[key];
   if (typeof value !== 'string') return undefined;
   return value.trim().length > 0 ? value : undefined;
+}
+
+function booleanContext(context: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const value = context?.[key];
+  return typeof value === 'boolean' ? value : undefined;
 }
